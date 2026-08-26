@@ -321,15 +321,19 @@ Two traps here, both of which produce error codes you'll otherwise spend an afte
 
 Finally, grant your users a role on the Foundry resource that permits inference — **Cognitive Services User** is the obvious one. Record the **Directory (tenant) ID** and **Application (client) ID** and paste them into the dialog.
 
-### Sign-in flow and model list
+### Sign-in flow, models, and cost controls
 
 Scroll down for the remaining settings.
-
-![Claude Desktop sign-in flow and Models section](images/09-claude-desktop-signin-models.png)
 
 **Which flow?** Device code is the default and needs no redirect URI, but Conditional Access policies that block device-code auth will kill it. The browser flow sidesteps that entirely and is my default recommendation. The broker flow is the only one that satisfies Conditional Access policies requiring a compliant or managed device — if your customer has device-compliance CA rules, broker is not optional.
 
 **Model list** — add one entry per Foundry **deployment name**. The first entry is the default. Same rule as everywhere else in this post: deployment name, not model ID.
+
+![Claude Desktop Models section with estimated cost and price multiplier settings](images/09-claude-desktop-models.png)
+
+The same pane carries the cost controls, which matter if you're doing showback to business units. **Show estimated cost** puts a per-session estimate on the Usage page. **Price multiplier** scales that estimate — `0.85` means 85% of list — and **Model pricing** replaces Anthropic list price with your own per-model rates.
+
+Read the fine print on both: they **take effect in a future release**. Until then the app estimates at list price no matter what you configure here, so don't build a chargeback report on those numbers yet.
 
 Then **Apply locally**. Claude Desktop relaunches in 3P mode, and the sign-in screen offers **Start in Cowork on 3P**.
 

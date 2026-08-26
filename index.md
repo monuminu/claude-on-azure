@@ -43,7 +43,54 @@ Here's my resource with four Claude deployments alongside the OpenAI ones. They 
 
 ![Foundry deployments list showing four Claude deployments](images/01-deployments-list.png)
 
-Look at the right-hand pane: **"API Key authentication is disabled."** More on that shortly.
+### If the right-hand pane says "API Key authentication is disabled"
+
+That's the state my resource is in, and it's the one you'll hit in most regulated tenants — the resource has `disableLocalAuth: true`, so there is no key to copy and nothing to paste into a key field. Asking Azure for one just fails:
+
+```
+$ az cognitiveservices account keys list -n <resource> -g <rg>
+ERROR: (BadRequest) Failed to list key. disableLocalAuth is set to be true
+```
+
+You are not blocked. You have everything you need: the **endpoint** and your own Entra identity.
+
+**Grab two values from that same pane.** The **Project endpoint** gives you your resource name — the `contoso-foundry` in `https://contoso-foundry.services.ai.azure.com/...`. The **deployment name** is in the grid on the left (`claude-opus-5`). That's the whole configuration.
+
+**Make sure you have a role that permits inference** on the resource — **Cognitive Services User** or **Azure AI User**. Without it you'll get `403` no matter how valid your token is.
+
+**Then authenticate as yourself.** The Anthropic path lives at `/anthropic` on that host, and it takes an Entra bearer token:
+
+```bash
+az login
+TOK=$(az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv)
+
+curl https://<resource>.services.ai.azure.com/anthropic/v1/messages \
+  -H "Authorization: Bearer $TOK" \
+  -H "content-type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-opus-5","max_tokens":64,
+       "messages":[{"role":"user","content":"ping"}]}'
+```
+
+If that returns a message, you're done — every other surface in this post is the same two values wired up differently:
+
+| Surface | What you set |
+|---|---|
+| SDK | `AnthropicFoundry(resource=..., azure_ad_token_provider=...)` |
+| Claude Code | `CLAUDE_CODE_USE_FOUNDRY=1` + `ANTHROPIC_FOUNDRY_RESOURCE=<resource>` |
+| Claude Desktop | Credential kind → **Interactive sign-in** (the static-key option is unusable here) |
+
+A warning on that endpoint: **neither value the tooling hands you is the Anthropic endpoint.** The portal pane shows a *Project* endpoint ending in `/api/projects/<name>`, and `az cognitiveservices account show` reports the host as `<resource>.cognitiveservices.azure.com`. The Anthropic path is neither:
+
+```
+portal pane   https://<resource>.services.ai.azure.com/api/projects/<name>
+az CLI        https://<resource>.cognitiveservices.azure.com/
+what you want https://<resource>.services.ai.azure.com/anthropic/v1/messages
+```
+
+Take the **resource name** from either and build the URL yourself. Don't paste.
+
+Full detail on both auth methods is in Part 2.
 
 ### The decision that actually matters: where inference runs
 
@@ -97,14 +144,7 @@ https://{resource}.services.ai.azure.com/anthropic/v1/messages
 
 Two auth methods: API keys, or Entra ID. **Use Entra ID.**
 
-The resource I tested has `disableLocalAuth: true`, which removes key auth entirely — that's why the portal shows "API Key authentication is disabled." Try to fetch a key and Azure refuses outright:
-
-```
-$ az cognitiveservices account keys list -n <resource> -g <rg>
-ERROR: (BadRequest) Failed to list key. disableLocalAuth is set to be true
-```
-
-This is the posture to aim for. No key to rotate, no key to leak, no key in a `.env` someone commits at 11pm. Access is Azure RBAC — `Azure AI User` or `Cognitive Services User` — and it's revoked the moment someone leaves the directory.
+Even where keys are available, keyless is the posture to aim for: nothing to rotate, nothing to leak, nothing sitting in a `.env` someone commits at 11pm. Access is Azure RBAC — `Azure AI User` or `Cognitive Services User` — and it's revoked the moment someone leaves the directory.
 
 Here's a real call:
 

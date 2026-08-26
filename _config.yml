@@ -1,0 +1,22 @@
+title: Claude on Azure
+description: >-
+  A working guide to Claude in Microsoft Foundry, Claude Code, and Claude Desktop —
+  including how to run Cowork on your own Azure endpoint.
+author: Manoranjan Rajguru
+theme: minima
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+minima:
+  skin: dark
+
+header_pages: []
+
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - vendor

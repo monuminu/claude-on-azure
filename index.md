@@ -4,7 +4,7 @@ title: "Claude on Azure: Wiring Anthropic Into the Microsoft Ecosystem"
 description: "A working guide to Claude in Microsoft Foundry, Claude Code, and Claude Desktop — including how to run Cowork on your own Azure endpoint."
 ---
 
-*A working guide to Claude in Microsoft Foundry, Claude Code, and Claude Desktop — including how to run Cowork on your own Azure endpoint.*
+*A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, and the Microsoft 365 connector — including how to run Cowork on your own Azure endpoint.*
 
 I spend most of my week in front of Indian enterprises — banks, NBFCs, fintechs — who want frontier AI without handing a new vendor their data, their procurement cycle, and their compliance posture. For the last year the answer to "can we use Claude?" was awkward. It meant a separate contract, a separate invoice, and a separate conversation with the security team.
 
@@ -28,6 +28,8 @@ The single most common confusion I see: people assume "Anthropic on Azure" is on
 The key point: **Cowork is not locked to Anthropic's infrastructure.** Claude Desktop has a third-party inference mode that routes every model call to your own Foundry resource — billed to your Azure account, with conversations stored locally on the device. That's the deployment enterprises actually want, and it's the least-known part of this whole story.
 
 What you're choosing between is *how your users reach Claude*: terminal, desktop app, or your own code. The governance boundary is the same for all three.
+
+One thing that table deliberately leaves out: the **Microsoft 365 connector**, which is about what Claude can *read* in your tenant rather than where it runs. Different boundary, different admin. Part 5.
 
 ---
 
@@ -353,6 +355,67 @@ Also check the subscription type early. Claude models in Foundry require a paid 
 
 ---
 
+## Part 5 — The M365 connector: a different plane again
+
+Everything so far has been about the **inference plane** — where the model runs. The Microsoft 365 connector is about the **data plane**: what Claude can reach inside your tenant. Mail, OneDrive, SharePoint, Teams, calendar, over MCP.
+
+These are governed separately, and conflating them is the mistake I'd most expect a reader of this post to make. **Routing inference through your Foundry resource does nothing to govern the connector.** The connector's access is controlled by Entra app consent against Microsoft Graph — a different boundary, a different admin, a different review.
+
+### Two ways to set it up
+
+**Option 1 — consent through Claude.** If your Entra Global Administrator has a Claude account, they connect at **Customize → Connectors**, authenticate, and tick the box granting consent *on behalf of the whole organization*. Everyone else then just authenticates; no consent prompt.
+
+**Option 2 — manual setup in Entra.** Use this when the Global Admin doesn't have a Claude account — common, since the person holding Global Admin is rarely the person piloting Claude — or when you're troubleshooting a broken install.
+
+This adds two service principals to your tenant, one per app registration, giving each a service-level identity to reach Graph.
+
+**Step 1 — add the service principals.** In [Microsoft Graph Explorer](https://developer.microsoft.com/graph/graph-explorer):
+
+```http
+POST https://graph.microsoft.com/v1.0/servicePrincipals
+{"appId":"08ad6f98-a4f8-4635-bb8d-f1a3044760f0"}     # M365 MCP Client for Claude
+```
+
+```http
+POST https://graph.microsoft.com/v1.0/servicePrincipals
+{"appId":"07c030f6-5743-41b7-ba00-0a6e85f37c17"}     # M365 MCP Server for Claude
+```
+
+**Step 2 — grant admin consent.** Visit both URLs, substituting your tenant ID:
+
+```
+https://login.microsoftonline.com/{tenant-id}/adminconsent?client_id=08ad6f98-a4f8-4635-bb8d-f1a3044760f0
+https://login.microsoftonline.com/{tenant-id}/adminconsent?client_id=07c030f6-5743-41b7-ba00-0a6e85f37c17
+```
+
+Each prompts you to consent to the delegated permissions on behalf of the organization.
+
+**Step 3 — finish, per plan.** On **Team and Enterprise**, a Claude organization Owner enables the connector under **Organization settings → Connectors**; members then connect individually. On **Free, Pro, and Max**, members connect themselves at **Customize → Connectors**.
+
+### Restricting who can use it
+
+At [entra.microsoft.com](https://entra.microsoft.com), open the **M365 MCP Server for Claude** enterprise application → **Properties** → set **Assignment required?** to *Yes*, then add the permitted users or groups under **Users and groups**.
+
+Then do exactly the same for **M365 MCP Client for Claude**. Both components must be restricted to the same set of people — restricting one and not the other gets you an inconsistent state rather than a smaller blast radius.
+
+### Restricting what it can reach
+
+Revoke Graph scopes you don't want: **Enterprise Applications** → clear the application-type filter → **M365 MCP Server for Claude** → **Permissions** → **Admin consent** tab → select the permission → **…** → **Revoke permission**.
+
+Revoking `Sites.Read.All`, for instance, cuts SharePoint access specifically. Calls needing a revoked scope return `Failed to call tool`. To restore, re-run the Step 2 consent URLs — that resets permissions to the default set.
+
+**A note on the official docs:** the Anthropic help article gives this portal as `entra.admin.com`. That domain doesn't exist — it returns NXDOMAIN. Use **entra.microsoft.com**, the same host as the previous section.
+
+### Three things worth knowing before you approve this
+
+**Delegated permissions only.** Users reach exactly what they could already reach; the connector cannot exceed a user's own access, and service principal authentication isn't supported at all. That's a genuinely good default and usually the fastest way to close out a security review.
+
+**Location-based Conditional Access does not work.** All server-side requests originate from Anthropic's IP range, so a network or named-location policy doesn't restrict the connector — it blocks it for *every* member. If your customer runs IP-restricted CA policies, and plenty of Indian BFSI tenants do, resolve this before the pilot rather than during it. Group-based policies and MFA work fine, since they're evaluated at sign-in. Device compliance is evaluated only at connection time, not per call.
+
+**Write tools are off by default** for existing organisations until an admin explicitly enables them, and **Teams is read-only permanently**, regardless of what you configure.
+
+---
+
 ## Governance and economics
 
 **Billing.** Claude in Foundry meters in **Claude Consumption Units (CCUs)** — hourly, invoiced monthly in arrears through Azure Marketplace. CCUs are not prepaid credits: no balance, no commitment, no expiry. Usage lands on your Azure invoice and is MACC-eligible, which for a customer with a large Azure commitment is often the entire reason this conversation happens.
@@ -399,6 +462,9 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 8. **Entra tokens expire in ~1 hour.** Use a token provider, not a static token.
 9. **No Batches API, no Admin API, no Managed Agents** on Foundry.
 10. **Claude Desktop's browser sign-in wants literal `127.0.0.1`**, under **Mobile and desktop applications** — not `localhost`, not the **Web** platform.
+11. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
+12. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
+13. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
 11. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
 
 ---
@@ -424,4 +490,6 @@ For the customers I work with, that collapses a six-month procurement cycle into
 - [Deploy Claude Desktop on 3P with Microsoft Foundry — Anthropic docs](https://claude.com/docs/third-party/claude-desktop/foundry)
 - [Configure Claude Desktop for Microsoft Foundry — Microsoft Learn](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-claude-desktop)
 - [Claude Cowork](https://claude.com/product/cowork)
+- [Set up the Microsoft 365 connector — Anthropic Help Center](https://support.claude.com/en/articles/12542951-set-up-the-microsoft-365-connector)
+- [Microsoft 365 connector security guide — Anthropic Help Center](https://support.claude.com/en/articles/12684923-microsoft-365-connector-security-guide)
 

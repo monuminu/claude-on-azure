@@ -1,8 +1,8 @@
 # Claude on Azure
 
 A working guide to running Anthropic's Claude inside the Microsoft ecosystem — **Claude in Microsoft
-Foundry**, **Claude Code**, and **Claude Desktop** (including how to run Cowork against your own
-Azure endpoint).
+Foundry**, **Claude Code**, **Claude Desktop** (including how to run Cowork against your own Azure
+endpoint), and the **Microsoft 365 connector**.
 
 📖 **[Read the guide →](https://monuminu.github.io/claude-on-azure/)**
 
@@ -16,6 +16,8 @@ Azure endpoint).
   be your first support ticket
 - Configuring **Claude Desktop** in third-party inference mode — static API key for a pilot, Entra
   app registration for a real rollout, plus MDM export
+- Setting up the **Microsoft 365 connector** by hand in Entra when your Global Admin has no Claude
+  account, and the Conditional Access limitation that will break it
 - CCU billing, RBAC, monitoring, and a decision table for Foundry vs the direct Claude API
 
 ## Repo contents

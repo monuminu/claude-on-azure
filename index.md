@@ -278,7 +278,7 @@ No Anthropic seat licensing. No conversation data leaving the device. Token cons
 
 Third-party inference is behind a developer flag. In Claude Desktop: **Help → Troubleshooting → Enable Developer Mode**, then **Developer → Configure Third-Party Inference…**
 
-![Claude Desktop Developer menu with Configure Third-Party Inference highlighted](images/06-claude-desktop-developer-menu.png)
+![Claude Desktop Developer menu showing Configure Third-Party Inference](images/06-claude-desktop-developer-menu.png)
 
 ### Pick a credential kind
 

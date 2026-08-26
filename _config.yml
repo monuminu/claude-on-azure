@@ -10,7 +10,7 @@ kramdown:
   input: GFM
   syntax_highlighter: rouge
 
-header_pages: []
+repository: monuminu/claude-on-azure
 
 exclude:
   - README.md

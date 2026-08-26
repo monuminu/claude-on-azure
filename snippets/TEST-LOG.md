@@ -1,3 +1,9 @@
+---
+layout: page
+title: "Test log"
+description: "What each call against a live Microsoft Foundry resource actually returned."
+---
+
 # Verification log — Claude on Microsoft Foundry
 
 Resource names below are placeholders. Region: swedencentral.

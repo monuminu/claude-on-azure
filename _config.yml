@@ -10,9 +10,6 @@ kramdown:
   input: GFM
   syntax_highlighter: rouge
 
-minima:
-  skin: dark
-
 header_pages: []
 
 exclude:

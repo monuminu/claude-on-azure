@@ -36,14 +36,12 @@ snippets/
   05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
   06-claude-code-managed-settings.json  admin-pushed Claude Code settings
   07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
-  TEST-LOG.md       what each call actually returned
 ```
 
 ## About the testing
 
 The API, SDK, and Claude Code sections were executed against a live Foundry resource on
-**25 August 2026**; every response shown in the guide is real output. `snippets/TEST-LOG.md` records
-what each call returned, including the results that contradicted my expectations.
+**25 August 2026**; every response shown in the guide is real output.
 
 The Claude Desktop section follows the official
 [Microsoft](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-claude-desktop)
@@ -51,12 +49,15 @@ and [Anthropic](https://claude.com/docs/third-party/claude-desktop/foundry) depl
 screenshots of the actual configuration dialog.
 
 **The API Management section was executed against a live BasicV2 gateway on 1 September 2026**,
-fronting the same Foundry resource. Findings 11–16 in `snippets/TEST-LOG.md` record it, including
-the two results that contradicted the first draft: the token audience is the bare application ID
-rather than `api://<guid>`, and Claude Code sends its credential in `x-api-key` while also sending
-a literal `Authorization: Bearer dummy` alongside it. Claude Desktop in Gateway mode is the one
-path not driven end to end — the gateway accepts its header shape, but no Desktop client has
-signed in through it.
+fronting the same Foundry resource, with both Claude Code and Claude Desktop driving it end to end
+under per-user Entra sign-in. Three results contradicted the first draft: the token audience is the
+bare application ID rather than `api://<guid>`; Claude Code sends its credential in `x-api-key`
+while also sending a literal `Authorization: Bearer dummy` alongside it; and `llm-token-limit` does
+throttle streamed traffic — an earlier draft said otherwise, on the strength of a test whose token
+bucket refilled faster than the debit could be observed.
+
+One item is unresolved: `llm-emit-token-metric` produced no custom metric namespace, so per-user
+attribution in the guide relies on `GatewayLlmLogs`.
 
 Cloud capabilities move quickly. Verify against your own deployment before building on anything here.
 

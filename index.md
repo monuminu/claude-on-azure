@@ -678,11 +678,40 @@ Claude Code is running through APIM.
 
 Both Claude clients stream everything, and streaming constrains what a gateway can do.
 
-**`llm-token-limit` does not constrain either Claude client.** On a streamed request the bucket is never debited — not by the completion tokens, and not by the prompt tokens either. `x-tokens-consumed` reports the prompt count, but `x-tokens-remaining` stays at its full value across consecutive streamed calls, and a non-streamed call afterwards debits only its own usage. Both Claude Code and Claude Desktop stream everything, so a `tokens-per-minute` limit on this API doesn't cap them at all. On non-streamed calls the same policy is exact.
+**`llm-token-limit` does throttle streamed traffic, and that's what makes per-developer limits work.** Because `counter-key` is the caller's `oid`, every developer gets their own budget — enforced at the gateway, on the streaming requests both Claude clients actually send. Against a deliberately low 200 tokens-per-minute:
 
-So use `llm-token-limit` for non-streaming application traffic, and do capacity control for the interactive clients at the Foundry deployment's TPM instead. If someone in the room assumes the gateway is capping developer spend, correct them before it reaches a design document.
+```
+call 1: HTTP 200  remaining=200   (actual output_tokens: 200)
+call 2: HTTP 429  remaining=0     Retry-After: 33
+call 3: HTTP 429  remaining=0     Retry-After: 32
+```
 
-**Account for tokens with `GatewayLlmLogs` instead.** It records prompt, completion, and total tokens per request, and unlike the throttle it is exact on streamed calls too — `IsStreamCompletion` marks which is which. That split is odd, but it means chargeback is achievable: use the log for attribution, the policy for throttling non-interactive traffic.
+One call drained the bucket, the next were rejected, and `Retry-After` told the client when to come back.
+
+**Read `x-tokens-remaining` on a 200 with care.** On a streamed call the response headers are emitted before the completion tokens exist, so the value reflects the state *before* that request's completion is charged. Call 1 above reports `remaining=200` on a request that was about to consume 215. The debit lands; the header just can't show it yet. Use the header as a rough signal, never as an accounting record.
+
+**This is why an over-large bucket hides the throttle in testing.** At `tokens-per-minute="20000"`, a v2 token bucket refills at ~333 tokens/second, so a 200-token call is replenished in under a second. Space your test calls a few seconds apart and `remaining` reads full every time — which looks exactly like streamed traffic not being counted. It is being counted. Test with a limit small enough to actually exhaust.
+
+**For developer budgets, reach for `token-quota` rather than `tokens-per-minute`.** A per-minute rate limits bursts; a quota limits spend over a period, which is the thing you're usually asked to control:
+
+```xml
+<llm-token-limit
+    counter-key="@((string)context.Variables["callerOid"])"
+    tokens-per-minute="20000"
+    token-quota="2000000" token-quota-period="Monthly"
+    estimate-prompt-tokens="false"
+    remaining-quota-tokens-header-name="x-quota-remaining" />
+```
+
+Periods are `Hourly`, `Daily`, `Weekly`, `Monthly`, `Yearly`. Exhausting a quota returns **403**, not 429, with a message naming the reset time:
+
+```
+{ "statusCode": 403, "message": "Token quota is exceeded. Try again in 41 minutes and 54 seconds." }
+```
+
+Both limits can run on one policy: the rate protects the backend from bursts, the quota holds the monthly budget.
+
+**Account for tokens with `GatewayLlmLogs`, not with the throttle.** On streamed requests `llm-token-limit` works from *estimated* token counts — good enough to enforce a budget, not good enough to bill against. The log records prompt, completion, and total tokens per request and is exact on streamed calls, with `IsStreamCompletion` marking which is which. So: policy for enforcement, log for chargeback.
 
 **Turn it on properly, and it's two resources.** An APIM-level diagnostic on the API to enable LLM logging, and an Azure Monitor diagnostic setting to route the category:
 
@@ -865,8 +894,8 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 15. **Claude Code sends `Authorization: Bearer dummy` *and* `x-api-key`.** A `skip`-based header normalisation never fires. Override on the presence of `x-api-key`.
 16. **The audience is the bare app ID on a v2 token**, not `api://<guid>`. Decode a real token before writing the policy.
 17. **A wrong-audience 401 is byte-identical to a no-token 401.** Nothing mentions audiences.
-18. **`llm-token-limit` doesn't debit the bucket on streamed traffic** — and both Claude clients stream. Cap at the Foundry deployment's TPM instead.
-19. **`GatewayLlmLogs` *does* count streamed tokens, exactly.** Use the log for chargeback, not the throttle policy.
+18. **`x-tokens-remaining` is stale on streamed 200s** — headers are emitted before the completion is charged, so a large `tokens-per-minute` makes the throttle look inert when it isn't. Test with a limit small enough to exhaust.
+19. **`GatewayLlmLogs` counts streamed tokens exactly; the throttle estimates them.** Use the log for chargeback, the policy for enforcement.
 20. **Create the diagnostic setting in resource-specific mode.** `ApiManagementGatewayLlmLog` is only populated when `logAnalyticsDestinationType` is `'Dedicated'` (CLI: `--export-to-resource-specific`).
 21. **Managed settings and the Desktop `.mobileconfig` are separate channels.** Push both or one surface silently bypasses your gateway.
 22. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
@@ -886,7 +915,7 @@ For the customers I work with, that collapses a six-month procurement cycle into
 
 ---
 
-*Everything here was executed against live resources: the API, SDK, and Claude Code sections against a Foundry resource on 25 August 2026, and Part 5 against a BasicV2 API Management instance in front of that same resource on 1 September 2026 — including Claude Code and Claude Desktop both driving the gateway end to end under per-user Entra sign-in. Every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the results that contradicted expectations. The Claude Desktop configuration steps follow the official Microsoft and Anthropic deployment guides. One item remains unresolved and is called out there rather than here: `llm-emit-token-metric` produced no custom metric namespace, so token attribution in this Part relies on `GatewayLlmLogs`. Screenshots have tenant, subscription, application, and resource identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
+*Everything here was executed against live resources: the API, SDK, and Claude Code sections against a Foundry resource on 25 August 2026, and Part 5 against a BasicV2 API Management instance in front of that same resource on 1 September 2026 — including Claude Code and Claude Desktop both driving the gateway end to end under per-user Entra sign-in. Every response shown is real output, including the ones that contradicted the first draft. One item remains unresolved: `llm-emit-token-metric` produced no custom metric namespace, so token attribution in this Part relies on `GatewayLlmLogs`. The Claude Desktop configuration steps follow the official Microsoft and Anthropic deployment guides. Screenshots have tenant, subscription, application, and resource identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
 
 **References**
 - [Claude in Microsoft Foundry is now generally available](https://azure.microsoft.com/en-us/blog/claude-in-microsoft-foundry-is-now-generally-available/)

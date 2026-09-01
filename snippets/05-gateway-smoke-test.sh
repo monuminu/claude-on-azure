@@ -2,7 +2,7 @@
 # Smoke test for the APIM gateway in front of Claude on Microsoft Foundry.
 #
 # STATUS: VERIFIED 2026-09-01 against a live BasicV2 gateway. Cases 1-4 all behaved
-# as written; see Findings 14-16 in TEST-LOG.md.
+# as written.
 #
 # NOTE on API_APP_ID: for an app registration with requestedAccessTokenVersion 2 the
 # token's aud is the BARE application ID, not api://<guid>. Pass whichever your app
@@ -67,4 +67,4 @@ curl -sN "$GATEWAY/v1/messages" \
 
 # Case 5 has no curl equivalent: a token for a user who is NOT assigned the
 # Claude.User app role should return 401 from required-claims. Mint it as that user.
-echo "== done. Record each result in TEST-LOG.md, including anything unexpected. =="
+echo "== done. =="

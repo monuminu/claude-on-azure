@@ -2,11 +2,11 @@
   APIM inbound policy: per-user Entra ID auth in front of Claude on Microsoft Foundry.
 
   STATUS: VERIFIED. Deployed to a live BasicV2 instance on 2026-09-01 and exercised
-  with cURL and Claude Code end to end. See Findings 11-16 in TEST-LOG.md.
-  Both former unknowns are now settled:
+  with cURL and Claude Code end to end. Both former unknowns are now settled:
     (a) resource="https://ai.azure.com" is correct - Foundry accepts the token
-    (b) llm-token-limit is EXACT on non-streamed calls and does NOT debit the
-        bucket at all on streamed ones. Both Claude clients always stream.
+    (b) llm-token-limit DOES throttle streamed traffic. Both tokens-per-minute
+        (429) and token-quota (403) fire on the streams both Claude clients send.
+        Counts are estimated on streams and exact on non-streamed calls.
 
   Scope: attach to an API whose serviceUrl is
   https://<resource>.services.ai.azure.com/anthropic
@@ -21,7 +21,7 @@
          Claude Desktop's gateway OIDC flow sends the user token in Authorization.
          Claude Code sends the apiKeyHelper output in x-api-key AND a literal
          "Authorization: Bearer dummy" placeholder alongside it. VERIFIED against
-         claude-cli 2.1.233 — see Finding 15 in TEST-LOG.md.
+         claude-cli 2.1.233.
 
          So exists-action="skip" is useless here: Authorization already exists, it
          just contains the word "dummy", and validate-azure-ad-token then rejects it.
@@ -79,8 +79,8 @@
          https://ai.azure.com/.default — NOT https://cognitiveservices.azure.com,
          which is what every OpenAI-flavoured APIM sample uses. No Microsoft doc
          shows this value inside authentication-managed-identity, but it is
-         VERIFIED correct — Foundry returned a real completion through it
-         (Finding 14). ignore-error="false" makes a credential failure loud
+         VERIFIED correct — Foundry returned a real completion through it.
+         ignore-error="false" makes a credential failure loud
          instead of forwarding an unauthenticated request. -->
     <authentication-managed-identity
         resource="https://ai.azure.com"
@@ -98,15 +98,31 @@
     <set-header name="x-api-key" exists-action="delete" />
 
     <!-- 5. Governance, keyed on the real human rather than a shared secret.
-         Counters are per gateway — they do not aggregate across regions or
+         VERIFIED to throttle streamed traffic: tokens-per-minute returns 429 with
+         Retry-After, token-quota returns 403 naming the reset time.
+
+         Two levers, deliberately both set:
+           tokens-per-minute - burst protection for the backend
+           token-quota       - the per-developer spend budget
+
+         Counters are per gateway - they do not aggregate across regions or
          workspaces. v2 tiers use a token bucket, so an initial burst equal to
-         tokens-per-minute is allowed. -->
+         tokens-per-minute is allowed, and it refills continuously (20000/min is
+         ~333 tokens/sec). Do not size a TEST limit so high that a call refills
+         before you can observe the debit; that reads as "streams aren't counted".
+
+         x-tokens-remaining on a streamed 200 is emitted BEFORE the completion is
+         charged, so it under-reports that request's own usage. Use GatewayLlmLogs
+         for accounting, not this header. -->
     <llm-token-limit
         counter-key="@((string)context.Variables[&quot;callerOid&quot;])"
         tokens-per-minute="20000"
+        token-quota="2000000"
+        token-quota-period="Monthly"
         estimate-prompt-tokens="false"
         tokens-consumed-header-name="x-tokens-consumed"
-        remaining-tokens-header-name="x-tokens-remaining" />
+        remaining-tokens-header-name="x-tokens-remaining"
+        remaining-quota-tokens-header-name="x-quota-remaining" />
 
     <!-- Caps: 5 dimensions, 100 unique values per dimension, 1000 active time
          series per namespace. Beyond those, data is silently discarded — so a
@@ -118,8 +134,8 @@
 
     <!-- 6. Serve GET /v1/models from the gateway.
          Claude Desktop probes this at launch to populate its model picker, and
-         Foundry does not implement it — it returns 404 api_not_supported
-         (Finding 17). Answering here means Desktop's Model discovery works and the
+         Foundry does not implement it — it returns 404 api_not_supported.
+         Answering here means Desktop's Model discovery works and the
          model list is managed centrally, so no device needs one pushed to it.
          This sits AFTER validation, so the list is still behind the app role. -->
     <choose>

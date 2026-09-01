@@ -6,7 +6,7 @@
 # STATUS: VERIFIED 2026-09-01. Drove Claude Code through a live APIM gateway end to
 # end. IMPORTANT: Claude Code sends this output in the x-api-key header AND sends a
 # literal "Authorization: Bearer dummy" alongside it - your gateway policy must
-# override Authorization when x-api-key is present. See Finding 15 in TEST-LOG.md.
+# override Authorization when x-api-key is present.
 #
 # Contract, and it is strict:
 #   - print ONLY the credential to stdout, nothing else

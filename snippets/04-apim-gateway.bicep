@@ -2,9 +2,9 @@
 //
 // STATUS: COMPILES; the policy it deploys is VERIFIED. `bicep build` succeeds with no
 // errors or warnings (azure-cli 2.81.0) and the embedded policy round-trips correctly.
-// The policy itself was proven against a live BasicV2 instance (Findings 11-16 in
-// TEST-LOG.md) — but applied by `az rest`, to an APIM that already existed. This
-// template's own resource composition has not been deployed from scratch.
+// The policy itself was proven against a live BasicV2 instance — but applied by
+// `az rest`, to an APIM that already existed. This template's own resource
+// composition has not been deployed from scratch.
 //
 //   az deployment group create -g <rg> -f 04-apim-gateway.bicep \
 //      -p apimName=<name> foundryAccountName=<foundry> \
@@ -24,7 +24,7 @@ param entraTenantId string = subscription().tenantId
 @description('The aud claim clients present. For an app with requestedAccessTokenVersion 2 this is the BARE application ID, not api://<guid>. Decode a real token to be sure.')
 param gatewayAudience string
 
-@description('Resource ID of the Log Analytics workspace that receives GatewayLlmLogs. This is where per-request token counts land — including for streamed calls, which llm-token-limit cannot see.')
+@description('Resource ID of the Log Analytics workspace that receives GatewayLlmLogs. This is where exact per-request token counts land, including for streamed calls, which llm-token-limit only estimates.')
 param logAnalyticsWorkspaceId string
 
 resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
@@ -104,7 +104,7 @@ resource messagesOp 'Microsoft.ApiManagement/service/apis/operations@2024-05-01'
 }
 
 // Claude Desktop probes GET /v1/models to auto-discover models. Foundry does NOT
-// implement it — it returns 404 api_not_supported (Finding 17). Defining the
+// implement it — it returns 404 api_not_supported. Defining the
 // operation anyway means the probe surfaces Foundry's meaningful error instead of a
 // generic APIM 404. Either way you MUST set inferenceModels explicitly on Desktop.
 resource modelsOp 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
@@ -134,8 +134,8 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
 
 // ---------------------------------------------------------------------------
 // Observability. Without this you get request counts and status codes but no
-// token accounting — and llm-token-limit's headers do not survive streaming.
-// GatewayLlmLogs is the only path verified to count streamed tokens correctly.
+// token accounting. llm-token-limit enforces budgets from ESTIMATED counts on
+// streamed calls; GatewayLlmLogs is the exact record, so bill from the log.
 // ---------------------------------------------------------------------------
 
 resource azureMonitorLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01' = {

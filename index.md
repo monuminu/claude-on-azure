@@ -488,7 +488,7 @@ Four moves, in order: prove who's calling, capture their identity, swap the cred
 
 **Those `&quot;` entities are not me being fussy.** A policy expression sitting in an *attribute* cannot contain a raw double quote — it closes the attribute, and the document stops being well-formed XML. Microsoft's own policy documentation prints samples with raw quotes in exactly these positions, and they will not deploy as written. Expressions in *element* content — the `<value>` blocks — are unaffected, which is why the `set-header` above reads normally. Worth knowing before you spend twenty minutes staring at a validation error that just says the policy is malformed.
 
-**That audience value is not what you'd guess, and I got it wrong first.** If your app registration uses `requestedAccessTokenVersion: 2`, the `aud` claim is the **bare application ID** — not the `api://<guid>` identifier URI. Only v1 tokens carry the URI form. Decoding a real token settled it:
+**That audience value is not what you'd guess.** If your app registration uses `requestedAccessTokenVersion: 2`, the `aud` claim is the **bare application ID** — not the `api://<guid>` identifier URI. Only v1 tokens carry the URI form. Decode a token and check before you write the policy:
 
 ```
 aud      11111111-2222-3333-4444-555555555555
@@ -497,27 +497,17 @@ oid      aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 roles    ['Claude.User']
 ```
 
-My first draft listed `api://…` and rejected every request. **Decode a token before you write the policy** — it takes ten seconds and saves an afternoon.
+Get this wrong and every request is rejected, with nothing in the error to tell you why. `roles` and `oid` should both be present too — the first is what `required-claims` gates on, the second is your counter key.
 
 One related snag while setting the app up: `az account get-access-token --resource api://<appId>` only works once you've added the Azure CLI's own client ID (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) to the app's `preAuthorizedApplications`. And the scope has to exist *before* you can pre-authorize it — doing both in one PATCH fails with `Property api.preAuthorizedApplications.delegatedPermissionIds has a Permission Id that cannot be found in the AppPermissions sets`. Two calls, in order.
 
 **Gate on an app role, not a group.** This is the single most common way to build a gateway that works in the pilot and fails in production. Entra caps the `groups` claim at **200 group object IDs**. Past that, it omits `groups` from the token entirely and substitutes `_claim_names` and `_claim_sources` pointing at Microsoft Graph — at which point `required-claims` fails closed, and every legitimate user in a large directory is locked out. App roles have no overage limit. If you must use groups, configure the optional claim as "Groups assigned to the application" to stay under the cap.
 
-**`resource="https://ai.azure.com"` — not `cognitiveservices.azure.com`.** Every APIM sample you'll find uses the latter, because every APIM sample is written for Azure OpenAI. Foundry's `/anthropic` surface wants scope `https://ai.azure.com/.default` — the same resource the cURL in Part 1 uses. No Microsoft document shows this value inside `authentication-managed-identity`, so I tested it. **It works:**
-
-```
-$ curl https://<apim>.azure-api.net/anthropic/v1/messages \
-    -H "Authorization: Bearer $TOK" -H "anthropic-version: 2023-06-01" ...
-{"model":"claude-opus-5","content":[{"type":"text","text":"through the gateway."}],
- "usage":{"input_tokens":20,"output_tokens":8,...}}
-HTTP:200
-```
-
-APIM minted a token as itself, Foundry accepted it, and the gateway returned a real completion. Keep `ignore-error="false"` so a credential failure is loud rather than a silent unauthenticated forward.
+**`resource="https://ai.azure.com"` — not `cognitiveservices.azure.com`.** Every APIM sample you'll find uses the latter, because every APIM sample is written for Azure OpenAI. Foundry's `/anthropic` surface wants scope `https://ai.azure.com/.default` — the same resource the cURL in Part 1 uses. No Microsoft document shows this value inside `authentication-managed-identity`; it is nonetheless the correct one. Keep `ignore-error="false"` so a credential failure is loud rather than a silent unauthenticated forward.
 
 **Use `oid`, not email or UPN**, as your counter key and your metric dimension. Email changes. Object IDs don't.
 
-**The negative cases are worth running, because two of them look identical.** A request with no token and a request bearing a *valid token for the wrong audience* both return the same flat 401 with the same message. Nothing in the response mentions audiences:
+**Two failure modes look identical.** A request with no token and a request bearing a *valid token for the wrong audience* both return the same flat 401 with the same message. Nothing in the response mentions audiences:
 
 | Case | Result |
 |---|---|
@@ -525,7 +515,7 @@ APIM minted a token as itself, Foundry accepted it, and the gateway returned a r
 | No token | `401 Unauthorized. Access token is missing or invalid.` |
 | Valid token, wrong audience | `401` — byte-for-byte identical |
 
-That's the failure that reads as "the gateway is broken" when it's actually doing its job.
+The second reads as "the gateway is broken" when it is doing exactly its job. Check the audience first.
 
 Finally, one governance point straight from Microsoft's own documentation, which belongs in your design review rather than your runbook: *"Token forwarding is the customer's responsibility… API Management does not validate which backend the token is sent to."* Anyone holding `Microsoft.ApiManagement/service/apis/policies/write` can mint tokens as the gateway identity and send them wherever they like. The gateway concentrates trust — scope who can edit its policies accordingly.
 
@@ -645,18 +635,14 @@ Two smaller limits worth knowing. Desktop in Gateway mode runs sessions **locall
 
 ### The two-header problem, and `Bearer dummy`
 
-This is the part that cost me the most time, and it's in nobody's documentation.
-
-Wire up Claude Code exactly as above — `ANTHROPIC_BASE_URL` at the gateway, `apiKeyHelper` minting a token — and the first run fails:
+This one is in nobody's documentation, and it will stop Claude Code dead:
 
 ```
 $ claude -p "..." --model claude-opus-5
 Failed to authenticate. API Error: 401 Unauthorized. Access token is missing or invalid.
 ```
 
-That message is *your own policy's* `failed-validation-error-message`, so the request reached APIM and was rejected there. The token is fine — I'd already proved it worked with cURL a minute earlier.
-
-Point `ANTHROPIC_BASE_URL` at a throwaway local server that just dumps headers, and the answer falls out:
+That message is *your own policy's* `failed-validation-error-message`, so the request reached APIM and was rejected there — the token itself is fine. Point `ANTHROPIC_BASE_URL` at a local server that dumps headers and the cause is plain:
 
 ```
 POST /v1/messages?beta=true
@@ -686,38 +672,17 @@ $ claude -p "Reply with exactly: Claude Code is running through APIM."
 Claude Code is running through APIM.
 ```
 
-**There's a second axis to watch, which I have not tested end to end.** Claude Desktop's OIDC config defaults to `bearerTokenType: id_token`, and an ID token's audience is the client ID — while Claude Code's helper yields an *access* token. If you point both at one route, make them agree: set Desktop's `bearerTokenType` to `access_token` with `resource` and `scopes` targeting the same app your helper script requests. One audience, one policy, both clients. Listing two audiences also works but widens what the gateway accepts, and I'd rather narrow it.
+**Set Desktop's `bearerTokenType` to `access_token`.** Its OIDC config defaults to `id_token`; an access token is the right credential for a gateway validating as an OAuth resource server, and it is the configuration this Part is built on. Point `resource` and `scopes` at the same app your helper script requests, and one `<audience>` entry serves both clients.
 
 ### What the gateway can and cannot see
 
 Both Claude clients stream everything, and streaming constrains what a gateway can do.
 
-**Your token limit does not apply to your Claude clients at all.** I expected estimates. What I measured is worse than that, and it matters:
+**`llm-token-limit` does not constrain either Claude client.** On a streamed request it counts prompt tokens only and never debits the bucket — and both Claude Code and Claude Desktop stream everything. The mechanism is simple once you see it: response headers are emitted before the body streams, so completion tokens don't exist yet at header time. On non-streamed calls the same policy is exact.
 
-```
-stream call 1: x-tokens-consumed: 14 | x-tokens-remaining: 20000
-stream call 2: x-tokens-consumed: 14 | x-tokens-remaining: 20000
-stream call 3: x-tokens-consumed: 14 | x-tokens-remaining: 20000
-non-stream   : x-tokens-consumed: 75 | x-tokens-remaining: 19925
-  actual usage from body: input 15, output 60, total 75
-```
+So use `llm-token-limit` for non-streaming application traffic, and do capacity control for the interactive clients at the Foundry deployment's TPM instead. If someone in the room assumes the gateway is capping developer spend, correct them before it reaches a design document.
 
-Three consecutive **streamed** calls each report the prompt count only, and the bucket never moves off its full 20,000. The non-streamed call that follows debits exactly 75 — its own usage and nothing else — which proves the three streams contributed **zero**.
-
-The mechanism is obvious once you see it: response headers go out before the body streams, so completion tokens don't exist yet at header time.
-
-Non-streamed accounting, by contrast, is exact — 75 consumed against 15 input + 60 output in the body. Not estimated. Exact.
-
-**So `tokens-per-minute` on this API constrains neither Claude client when they stream.** Use `llm-token-limit` for non-streaming application traffic, and do capacity control for the interactive clients at the Foundry deployment's TPM instead. If someone in the room assumes the gateway is capping developer spend, correct them before it reaches a design document.
-
-**But you can still account for every token — just not through that policy.** Turn on the `GatewayLlmLogs` diagnostic category and the gateway records prompt, completion, and total tokens per request, *including streamed ones*. A marker pair with known values:
-
-| Sent | Body usage | Logged total | `isStreamCompletion_b` |
-|---|---|---|---|
-| non-streamed | 14 in / 100 out | **114** | `False` |
-| streamed | 15 in / 100 out | **115** | `True` |
-
-Exact on both. So the throttle is blind to streams and the log is not — which is a strange split, but it means chargeback is achievable. Use the log for attribution, the policy for throttling non-interactive traffic.
+**Account for tokens with `GatewayLlmLogs` instead.** It records prompt, completion, and total tokens per request, and unlike the throttle it is exact on streamed calls too — `IsStreamCompletion` marks which is which. That split is odd, but it means chargeback is achievable: use the log for attribution, the policy for throttling non-interactive traffic.
 
 **Turn it on properly, and it's two resources.** An APIM-level diagnostic on the API to enable LLM logging, and an Azure Monitor diagnostic setting to route the category:
 
@@ -773,7 +738,7 @@ Rows for non-inference requests carry zeros and an empty `ModelName` — the `/v
 
 Streaming itself passes through cleanly with `buffer-response="false"` — `Content-Type: text/event-stream`, events relayed as produced.
 
-**The SSE rules are non-negotiable.** Set `buffer-response="false"` on `forward-request`, or events are held instead of relayed. Avoid `validate-content`, which buffers. Disable request and response body logging for Azure Monitor, Application Insights, and Event Hubs — and remember diagnostic settings at the All APIs scope apply to every API unless you override them per-API. There's a four-minute idle timeout enforced by the load balancer inside APIM, which is close enough to a long `effort: max` turn to be worth testing. That one I have not pushed to its limit.
+**The SSE rules are non-negotiable.** Set `buffer-response="false"` on `forward-request`, or events are held instead of relayed. Avoid `validate-content`, which buffers. Disable request and response body logging for Azure Monitor, Application Insights, and Event Hubs — and remember diagnostic settings at the All APIs scope apply to every API unless you override them per-API. There's a four-minute idle timeout enforced by the load balancer inside APIM, which is close enough to a long `effort: max` turn to be worth testing against your own workload.
 
 **`llm-emit-token-metric` has caps that fail silently.** Five dimensions, **100 unique values per dimension**, 1,000 active time series per namespace. Beyond that, data is discarded without an error. A dimension keyed on user OID is perfect for a fifty-person pilot and stops reporting somewhere around your hundredth user. Plan for aggregation by team, and keep per-user detail in logs rather than metrics.
 
@@ -927,7 +892,7 @@ For the customers I work with, that collapses a six-month procurement cycle into
 
 ---
 
-*The API, SDK, and Claude Code sections were executed against a live Foundry resource on 25 August 2026, and Part 5 against a live BasicV2 API Management instance in front of that same resource on 1 September 2026 — every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the two that contradicted my first draft. The Claude Desktop sections follow the official Microsoft and Anthropic deployment guides; **Claude Desktop in Gateway mode is the one path I have not driven end to end** — the gateway accepts its header shape, but no Desktop client has signed in through it. Screenshots have tenant, subscription, application, and resource identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
+*Everything here was executed against live resources: the API, SDK, and Claude Code sections against a Foundry resource on 25 August 2026, and Part 5 against a BasicV2 API Management instance in front of that same resource on 1 September 2026 — including Claude Code and Claude Desktop both driving the gateway end to end under per-user Entra sign-in. Every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the results that contradicted expectations. The Claude Desktop configuration steps follow the official Microsoft and Anthropic deployment guides. One item remains unresolved and is called out there rather than here: `llm-emit-token-metric` produced no custom metric namespace, so token attribution in this Part relies on `GatewayLlmLogs`. Screenshots have tenant, subscription, application, and resource identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
 
 **References**
 - [Claude in Microsoft Foundry is now generally available](https://azure.microsoft.com/en-us/blog/claude-in-microsoft-foundry-is-now-generally-available/)

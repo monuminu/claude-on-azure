@@ -764,9 +764,7 @@ Rows for non-inference requests carry zeros and an empty `ModelName` — the `/v
 - **No request or response body logging** for Azure Monitor, Application Insights, or Event Hubs. Diagnostic settings at the *All APIs* scope apply to every API unless you override them per-API.
 - **Budget for a four-minute idle timeout**, enforced by the load balancer inside APIM. That's close enough to a long `effort: max` turn to be worth testing against your own workload.
 
-**`llm-emit-token-metric` has caps that fail silently.** Five dimensions, **100 unique values per dimension**, 1,000 active time series per namespace. Beyond that, data is discarded without an error. A dimension keyed on user OID is perfect for a fifty-person pilot and stops reporting somewhere around your hundredth user. Plan for aggregation by team, and keep per-user detail in logs rather than metrics.
-
-Counters are also per gateway — they don't aggregate across regions or workspaces. And v2 tiers use a token bucket rather than a sliding window, so an initial burst equal to `tokens-per-minute` is allowed.
+Two scoping rules worth knowing before you size a limit: counters are per gateway, so they don't aggregate across regions or workspaces; and v2 tiers use a token bucket rather than a sliding window, so an initial burst equal to `tokens-per-minute` is allowed.
 
 ### Two doors marked "Anthropic" that you should walk past
 

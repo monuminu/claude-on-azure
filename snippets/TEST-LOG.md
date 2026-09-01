@@ -424,8 +424,14 @@ Three consecutive streamed calls each report the prompt-token count only, and `r
 moves off the full 20000 bucket. The non-streamed call that follows debits exactly 75 — its own
 usage and nothing else — proving the three streams contributed zero.
 
-The mechanism is plain once seen: response headers are emitted before the body streams, so the
-completion tokens do not exist yet at header time.
+Note that even the 14 reported prompt tokens are not charged: `consumed` shows them, `remaining`
+does not move. So this is not "completion tokens are missed" — nothing is debited at all.
+
+**Mechanism unknown.** An earlier draft of this entry claimed the cause was that response headers
+are emitted before the body streams, so completion tokens don't exist at header time. That explains
+a stale header, not an undebited bucket — a limiter could charge the counter after the stream ends.
+And calls 2 and 3 were issued seconds after call 1 finished, with the bucket still full. Retracted:
+the behaviour is measured, the cause is not established.
 
 **Consequence for a rollout:** Claude Code and Claude Desktop always stream. A `tokens-per-minute`
 limit on this API therefore does not constrain them at all. Treat `llm-token-limit` as effective for

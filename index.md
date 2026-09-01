@@ -678,7 +678,7 @@ Claude Code is running through APIM.
 
 Both Claude clients stream everything, and streaming constrains what a gateway can do.
 
-**`llm-token-limit` does not constrain either Claude client.** On a streamed request it counts prompt tokens only and never debits the bucket — and both Claude Code and Claude Desktop stream everything. The mechanism is simple once you see it: response headers are emitted before the body streams, so completion tokens don't exist yet at header time. On non-streamed calls the same policy is exact.
+**`llm-token-limit` does not constrain either Claude client.** On a streamed request the bucket is never debited — not by the completion tokens, and not by the prompt tokens either. `x-tokens-consumed` reports the prompt count, but `x-tokens-remaining` stays at its full value across consecutive streamed calls, and a non-streamed call afterwards debits only its own usage. Both Claude Code and Claude Desktop stream everything, so a `tokens-per-minute` limit on this API doesn't cap them at all. On non-streamed calls the same policy is exact.
 
 So use `llm-token-limit` for non-streaming application traffic, and do capacity control for the interactive clients at the Foundry deployment's TPM instead. If someone in the room assumes the gateway is capping developer spend, correct them before it reaches a design document.
 

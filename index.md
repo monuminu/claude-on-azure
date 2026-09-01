@@ -529,8 +529,6 @@ That's the failure that reads as "the gateway is broken" when it's actually doin
 
 Finally, one governance point straight from Microsoft's own documentation, which belongs in your design review rather than your runbook: *"Token forwarding is the customer's responsibility… API Management does not validate which backend the token is sent to."* Anyone holding `Microsoft.ApiManagement/service/apis/policies/write` can mint tokens as the gateway identity and send them wherever they like. The gateway concentrates trust — scope who can edit its policies accordingly.
 
-![APIM policy editor showing validate-azure-ad-token and authentication-managed-identity](images/11-apim-policy-editor.png)
-
 ### Point Claude Code at it
 
 Two files, both pushed by the admin team, and the developer sets nothing.
@@ -584,6 +582,10 @@ Managed settings sit at the top of the precedence chain — above the command li
 
 Same Developer Mode route as Part 4 — **Help → Troubleshooting → Enable Developer Mode**, then **Developer → Configure Third-Party Inference…** — but this time set **Connection** to **Gateway** rather than Foundry.
 
+Set the base URL to your APIM route, leave the sign-in flow on `browser`, and the credential kind decides everything after it.
+
+![Claude Desktop gateway credentials with base URL and sign-in flow](images/11-claude-desktop-gateway-credentials.png)
+
 Then choose how users authenticate, and this is where Gateway mode earns its place. Instead of distributing a shared gateway key, set the credential kind to interactive and each user signs in with their own work account. First launch opens their browser at your normal Entra sign-in page; after that the app sends a per-user token to your gateway on every request. Conditional Access and MFA are enforced by Entra, exactly as they are for everything else your users touch.
 
 ![Claude Desktop Gateway connection with OIDC sign-in configured](images/12-claude-desktop-gateway-oidc.png)
@@ -607,6 +609,8 @@ Note that `inferenceGatewayOidc` is delivered as **one JSON-string-valued key**,
 Model discovery — Gateway /v1/models returned HTTP 404.
 404 https://<apim>.azure-api.net/anthropic/v1/models
 ```
+
+![Claude Desktop model discovery pointing at the gateway](images/13-claude-desktop-gateway-models.png)
 
 You can just switch discovery off and list deployment names on each device. But the better answer is to make the gateway answer the question, which is what a gateway is for — put the list behind the same auth as everything else and no device needs one pushed to it:
 
@@ -632,8 +636,6 @@ Place it *after* `validate-azure-ad-token`, so an unauthenticated probe still ge
 The Entra app registration is a **public client**, redirect URI exactly `http://127.0.0.1/callback`, under **Mobile and desktop applications**. That's the same pair of traps from Part 4, with the same two error codes: `localhost` instead of `127.0.0.1` gives you `AADSTS50011`, and registering under **Web** gives you a browser success page, a failed app, and `AADSTS7000218` in the logs.
 
 **Choose `broker` if your customer has device-compliance Conditional Access.** It mints the token through the OS identity broker rather than a loopback browser flow, and it's the only option that satisfies policies requiring a compliant or managed device. It's Entra-only and unsupported on Linux.
-
-![Claude Desktop first-launch organisational sign-in prompt](images/13-claude-desktop-gateway-signin.png)
 
 Then **Export**, same as Part 4, for the `.mobileconfig` or `.reg`. And here is the thing to write on the whiteboard:
 
@@ -774,8 +776,6 @@ Streaming itself passes through cleanly with `buffer-response="false"` — `Cont
 **The SSE rules are non-negotiable.** Set `buffer-response="false"` on `forward-request`, or events are held instead of relayed. Avoid `validate-content`, which buffers. Disable request and response body logging for Azure Monitor, Application Insights, and Event Hubs — and remember diagnostic settings at the All APIs scope apply to every API unless you override them per-API. There's a four-minute idle timeout enforced by the load balancer inside APIM, which is close enough to a long `effort: max` turn to be worth testing. That one I have not pushed to its limit.
 
 **`llm-emit-token-metric` has caps that fail silently.** Five dimensions, **100 unique values per dimension**, 1,000 active time series per namespace. Beyond that, data is discarded without an error. A dimension keyed on user OID is perfect for a fifty-person pilot and stops reporting somewhere around your hundredth user. Plan for aggregation by team, and keep per-user detail in logs rather than metrics.
-
-![Azure Monitor token metrics from the gateway, dimensioned per user](images/14-apim-token-metrics.png)
 
 Counters are also per gateway — they don't aggregate across regions or workspaces. And v2 tiers use a token bucket rather than a sliding window, so an initial burst equal to `tokens-per-minute` is allowed.
 
@@ -927,7 +927,7 @@ For the customers I work with, that collapses a six-month procurement cycle into
 
 ---
 
-*The API, SDK, and Claude Code sections were executed against a live Foundry resource on 25 August 2026, and Part 5 against a live BasicV2 API Management instance in front of that same resource on 1 September 2026 — every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the two that contradicted my first draft. The Claude Desktop sections follow the official Microsoft and Anthropic deployment guides; **Claude Desktop in Gateway mode is the one path I have not driven end to end** — the gateway accepts its header shape, but no Desktop client has signed in through it. Foundry portal screenshots have tenant identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
+*The API, SDK, and Claude Code sections were executed against a live Foundry resource on 25 August 2026, and Part 5 against a live BasicV2 API Management instance in front of that same resource on 1 September 2026 — every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the two that contradicted my first draft. The Claude Desktop sections follow the official Microsoft and Anthropic deployment guides; **Claude Desktop in Gateway mode is the one path I have not driven end to end** — the gateway accepts its header shape, but no Desktop client has signed in through it. Screenshots have tenant, subscription, application, and resource identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
 
 **References**
 - [Claude in Microsoft Foundry is now generally available](https://azure.microsoft.com/en-us/blog/claude-in-microsoft-foundry-is-now-generally-available/)

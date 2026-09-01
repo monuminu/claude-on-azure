@@ -171,10 +171,10 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
   }
 }
 
-// logAnalyticsDestinationType: 'Dedicated' is the ARM equivalent of the CLI's
-// --export-to-resource-specific. WITHOUT it, Azure defaults to legacy mode and
-// every row lands in the AzureDiagnostics table instead — ApiManagementGatewayLlmLog
-// stays empty forever, which reads exactly like a broken pipeline.
+// logAnalyticsDestinationType: 'Dedicated' is required — the ARM equivalent of the
+// CLI's --export-to-resource-specific. It is what routes rows into the dedicated
+// ApiManagementGatewayLlmLog table, with real column names (PromptTokens,
+// CompletionTokens, TotalTokens, IsStreamCompletion, ModelName).
 resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: apim
   name: 'claude-gateway-llm-logs'

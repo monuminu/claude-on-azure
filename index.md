@@ -720,15 +720,9 @@ ApiManagementGatewayLlmLog
           IsStreamCompletion, ModelName
 ```
 
-**Three things in those twenty lines will each cost you an hour.**
+**Three details in those twenty lines matter more than they look.**
 
-`logAnalyticsDestinationType: 'Dedicated'` — this is the ARM equivalent of the CLI's `--export-to-resource-specific`. Omit it and Azure silently defaults to legacy *Azure diagnostics* mode, which writes every row into the catch-all `AzureDiagnostics` table instead. `ApiManagementGatewayLlmLog` then stays empty forever, which reads exactly like a broken pipeline. It isn't. Your data is there, under lowercase-with-suffix column names:
-
-```kusto
-AzureDiagnostics
-| where Category == "GatewayLlmLogs"
-| project promptTokens_d, completionTokens_d, totalTokens_d, isStreamCompletion_b
-```
+`logAnalyticsDestinationType: 'Dedicated'` is required. It's the ARM equivalent of the CLI's `--export-to-resource-specific`, and it's what puts rows into `ApiManagementGatewayLlmLog` with the column names above. Set it when you create the diagnostic setting — if you're using the CLI, pass `--export-to-resource-specific`.
 
 `largeLanguageModel` emits **Bicep warning BCP037** — the type definition doesn't know the property yet. The ARM API accepts it and it survives into the compiled template, so suppress the warning rather than dropping the property. Do check it's still in your ARM output before you trust the suppression.
 
@@ -873,7 +867,7 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 17. **A wrong-audience 401 is byte-identical to a no-token 401.** Nothing mentions audiences.
 18. **`llm-token-limit` doesn't debit the bucket on streamed traffic** — and both Claude clients stream. Cap at the Foundry deployment's TPM instead.
 19. **`GatewayLlmLogs` *does* count streamed tokens, exactly.** Use the log for chargeback, not the throttle policy.
-20. **Diagnostic settings default to the `AzureDiagnostics` table.** `ApiManagementGatewayLlmLog` stays empty unless you set `logAnalyticsDestinationType: 'Dedicated'` (CLI: `--export-to-resource-specific`).
+20. **Create the diagnostic setting in resource-specific mode.** `ApiManagementGatewayLlmLog` is only populated when `logAnalyticsDestinationType` is `'Dedicated'` (CLI: `--export-to-resource-specific`).
 21. **Managed settings and the Desktop `.mobileconfig` are separate channels.** Push both or one surface silently bypasses your gateway.
 22. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
 23. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.

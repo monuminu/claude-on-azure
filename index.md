@@ -749,19 +749,20 @@ ApiManagementGatewayLlmLog
           IsStreamCompletion, ModelName
 ```
 
-**Three details in those twenty lines matter more than they look.**
+**Three things in that block are mandatory:**
 
-`logAnalyticsDestinationType: 'Dedicated'` is required. It's the ARM equivalent of the CLI's `--export-to-resource-specific`, and it's what puts rows into `ApiManagementGatewayLlmLog` with the column names above. Set it when you create the diagnostic setting — if you're using the CLI, pass `--export-to-resource-specific`.
-
-`largeLanguageModel` emits **Bicep warning BCP037** — the type definition doesn't know the property yet. The ARM API accepts it and it survives into the compiled template, so suppress the warning rather than dropping the property. Do check it's still in your ARM output before you trust the suppression.
-
-And the schema is narrower than it looks: `largeLanguageModel.requests.messages` and `.responses.messages` are rejected outright with `Invalid field ... specified`. Only `{ logs: 'enabled' }` is accepted. That's a happy accident — message-body capture buffers the response, and buffering breaks SSE, so the shape you're allowed is the shape you want.
+- **`logAnalyticsDestinationType: 'Dedicated'`** — routes rows to `ApiManagementGatewayLlmLog` with the column names above. CLI equivalent: `--export-to-resource-specific`.
+- **Keep `largeLanguageModel` despite Bicep warning `BCP037`** — the type definition lags the ARM API, which accepts the property. Suppress the warning rather than dropping the property, and confirm it survives into your compiled ARM.
+- **Only `{ logs: 'enabled' }` is accepted** — `largeLanguageModel.requests.messages` and `.responses.messages` are rejected with `Invalid field ... specified`. No loss: message-body capture buffers the response, and buffering breaks SSE.
 
 Rows for non-inference requests carry zeros and an empty `ModelName` — the `/v1/models` responder, 401s, and a `HEAD /anthropic/api/hello` probe Claude Desktop fires at startup. Join to `GatewayLogs` on `CorrelationId` for URL, method, and status.
 
-Streaming itself passes through cleanly with `buffer-response="false"` — `Content-Type: text/event-stream`, events relayed as produced.
+**The SSE rules are non-negotiable.** Get these right and streaming passes through cleanly — `Content-Type: text/event-stream`, events relayed as produced.
 
-**The SSE rules are non-negotiable.** Set `buffer-response="false"` on `forward-request`, or events are held instead of relayed. Avoid `validate-content`, which buffers. Disable request and response body logging for Azure Monitor, Application Insights, and Event Hubs — and remember diagnostic settings at the All APIs scope apply to every API unless you override them per-API. There's a four-minute idle timeout enforced by the load balancer inside APIM, which is close enough to a long `effort: max` turn to be worth testing against your own workload.
+- **`buffer-response="false"` on `forward-request`** — without it, events are held instead of relayed.
+- **No `validate-content`** — it buffers.
+- **No request or response body logging** for Azure Monitor, Application Insights, or Event Hubs. Diagnostic settings at the *All APIs* scope apply to every API unless you override them per-API.
+- **Budget for a four-minute idle timeout**, enforced by the load balancer inside APIM. That's close enough to a long `effort: max` turn to be worth testing against your own workload.
 
 **`llm-emit-token-metric` has caps that fail silently.** Five dimensions, **100 unique values per dimension**, 1,000 active time series per namespace. Beyond that, data is discarded without an error. A dimension keyed on user OID is perfect for a fifty-person pilot and stops reporting somewhere around your hundredth user. Plan for aggregation by team, and keep per-user detail in logs rather than metrics.
 

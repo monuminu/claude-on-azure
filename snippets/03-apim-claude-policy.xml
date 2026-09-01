@@ -1,0 +1,159 @@
+<!--
+  APIM inbound policy: per-user Entra ID auth in front of Claude on Microsoft Foundry.
+
+  STATUS: VERIFIED. Deployed to a live BasicV2 instance on 2026-09-01 and exercised
+  with cURL and Claude Code end to end. See Findings 11-16 in TEST-LOG.md.
+  Both former unknowns are now settled:
+    (a) resource="https://ai.azure.com" is correct - Foundry accepts the token
+    (b) llm-token-limit is EXACT on non-streamed calls and does NOT debit the
+        bucket at all on streamed ones. Both Claude clients always stream.
+
+  Scope: attach to an API whose serviceUrl is
+  https://<resource>.services.ai.azure.com/anthropic
+  Requires an API Management v2 tier (BasicV2 / StandardV2 / PremiumV2) for the
+  llm-* policies to understand the Anthropic Messages schema.
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!-- 0. Normalise the credential header.
+         Claude Desktop's gateway OIDC flow sends the user token in Authorization.
+         Claude Code sends the apiKeyHelper output in x-api-key AND a literal
+         "Authorization: Bearer dummy" placeholder alongside it. VERIFIED against
+         claude-cli 2.1.233 — see Finding 15 in TEST-LOG.md.
+
+         So exists-action="skip" is useless here: Authorization already exists, it
+         just contains the word "dummy", and validate-azure-ad-token then rejects it.
+         Override only when x-api-key is actually present, which leaves Desktop
+         traffic untouched. -->
+    <choose>
+      <when condition="@(context.Request.Headers.ContainsKey(&quot;x-api-key&quot;))">
+        <set-header name="Authorization" exists-action="override">
+          <value>@("Bearer " + context.Request.Headers.GetValueOrDefault("x-api-key", ""))</value>
+        </set-header>
+      </when>
+    </choose>
+
+    <!-- 1. Who is calling?
+         Gate on an app role, not a group. The groups claim is capped at 200 object
+         IDs; past that Entra omits it entirely and emits _claim_names/_claim_sources,
+         at which point required-claims fails closed for legitimate users.
+         App roles have no overage limit. -->
+    <validate-azure-ad-token
+        tenant-id="{{entra-tenant-id}}"
+        header-name="Authorization"
+        failed-validation-httpcode="401"
+        failed-validation-error-message="Unauthorized. Access token is missing or invalid."
+        output-token-variable-name="jwt">
+      <audiences>
+        <!-- VERIFIED: for a v2 access token (requestedAccessTokenVersion: 2) the aud
+             claim is the BARE application ID, not the api:// identifier URI. Only v1
+             tokens carry api://<guid>. Getting this wrong produces a flat 401 that
+             says nothing about audiences. Check a real token before trusting either. -->
+        <audience>{{claude-gateway-audience}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="roles" match="any">
+          <value>Claude.User</value>
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+
+    <!-- 2. Capture the caller's stable identity before the token is discarded.
+         oid, not email or UPN — those are mutable.
+
+         Note the &quot; entities. A policy expression in an ATTRIBUTE cannot contain
+         a raw double quote; it terminates the attribute and the document stops being
+         well-formed XML. Microsoft's own doc samples print raw quotes here, and they
+         will not deploy as written. Expressions in ELEMENT content — the <value>
+         blocks below — have no such problem. -->
+    <set-variable name="callerOid"
+                  value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;oid&quot;, &quot;unknown&quot;))" />
+
+    <!-- 3. Mint the gateway's own token and OVERWRITE the user's.
+         The user token must not reach Foundry: wrong audience, and forwarding it
+         leaks a user credential to the backend.
+
+         resource: Foundry's /anthropic surface requires scope
+         https://ai.azure.com/.default — NOT https://cognitiveservices.azure.com,
+         which is what every OpenAI-flavoured APIM sample uses. No Microsoft doc
+         shows this value inside authentication-managed-identity, but it is
+         VERIFIED correct — Foundry returned a real completion through it
+         (Finding 14). ignore-error="false" makes a credential failure loud
+         instead of forwarding an unauthenticated request. -->
+    <authentication-managed-identity
+        resource="https://ai.azure.com"
+        output-token-variable-name="foundry-token"
+        ignore-error="false" />
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + (string)context.Variables["foundry-token"])</value>
+    </set-header>
+
+    <!-- 4. Anthropic wire requirements. Drop any inbound x-api-key so it cannot
+         race the bearer token we just set. -->
+    <set-header name="anthropic-version" exists-action="skip">
+      <value>2023-06-01</value>
+    </set-header>
+    <set-header name="x-api-key" exists-action="delete" />
+
+    <!-- 5. Governance, keyed on the real human rather than a shared secret.
+         Counters are per gateway — they do not aggregate across regions or
+         workspaces. v2 tiers use a token bucket, so an initial burst equal to
+         tokens-per-minute is allowed. -->
+    <llm-token-limit
+        counter-key="@((string)context.Variables[&quot;callerOid&quot;])"
+        tokens-per-minute="20000"
+        estimate-prompt-tokens="false"
+        tokens-consumed-header-name="x-tokens-consumed"
+        remaining-tokens-header-name="x-tokens-remaining" />
+
+    <!-- Caps: 5 dimensions, 100 unique values per dimension, 1000 active time
+         series per namespace. Beyond those, data is silently discarded — so a
+         per-user dimension stops reporting once you pass 100 distinct users. -->
+    <llm-emit-token-metric namespace="claude-gateway">
+      <dimension name="User ID" value="@((string)context.Variables[&quot;callerOid&quot;])" />
+      <dimension name="API ID" />
+    </llm-emit-token-metric>
+
+    <!-- 6. Serve GET /v1/models from the gateway.
+         Claude Desktop probes this at launch to populate its model picker, and
+         Foundry does not implement it — it returns 404 api_not_supported
+         (Finding 17). Answering here means Desktop's Model discovery works and the
+         model list is managed centrally, so no device needs one pushed to it.
+         This sits AFTER validation, so the list is still behind the app role. -->
+    <choose>
+      <when condition="@(context.Request.Method == &quot;GET&quot; &amp;&amp; context.Request.Url.Path.Contains(&quot;/models&quot;))">
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"data":[
+{"type":"model","id":"claude-opus-5","display_name":"Claude Opus 5","created_at":"2026-01-01T00:00:00Z"},
+{"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5","created_at":"2026-01-01T00:00:00Z"},
+{"type":"model","id":"claude-opus-4-5","display_name":"Claude Opus 4.5","created_at":"2025-11-01T00:00:00Z"},
+{"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","created_at":"2025-10-01T00:00:00Z"}
+],"has_more":false,"first_id":"claude-opus-5","last_id":"claude-haiku-4-5"}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <set-backend-service base-url="https://{{foundry-resource-name}}.services.ai.azure.com/anthropic" />
+  </inbound>
+
+  <backend>
+    <!-- buffer-response="false" is mandatory for SSE. Without it, streamed events
+         are held rather than relayed. Note the 4-minute idle timeout enforced by
+         the load balancer inside APIM — long "thinking" turns can hit it. -->
+    <forward-request timeout="600" buffer-response="false" />
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

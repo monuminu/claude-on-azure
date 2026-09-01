@@ -1,16 +1,16 @@
 ---
 layout: page
 title: "Claude on Azure: Wiring Anthropic Into the Microsoft Ecosystem"
-description: "A working guide to Claude in Microsoft Foundry, Claude Code, and Claude Desktop — including how to run Cowork on your own Azure endpoint."
+description: "A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, and Azure API Management as an enterprise gateway — including how to run Cowork on your own Azure endpoint."
 ---
 
-*A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, and the Microsoft 365 connector — including how to run Cowork on your own Azure endpoint.*
+*A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, API Management as a gateway, and the Microsoft 365 connector — including how to run Cowork on your own Azure endpoint.*
 
 I spend most of my week in front of Indian enterprises — banks, NBFCs, fintechs — who want frontier AI without handing a new vendor their data, their procurement cycle, and their compliance posture. For the last year the answer to "can we use Claude?" was awkward. It meant a separate contract, a separate invoice, and a separate conversation with the security team.
 
 That changed. [Claude went generally available in Microsoft Foundry on 29 June 2026](https://azure.microsoft.com/en-us/blog/claude-in-microsoft-foundry-is-now-generally-available/). Claude now runs under your Azure subscription: Entra ID for auth, Azure RBAC for access, Azure Monitor for telemetry, and one line on your existing Azure invoice.
 
-This is the guide I wish I'd had. The API and CLI work below was run against a live Foundry resource; the Claude Desktop walkthrough follows Microsoft's and Anthropic's deployment docs, with screenshots of the actual configuration dialog.
+This is the guide I wish I'd had. The API, CLI, and gateway work below was run against a live Foundry resource and a live API Management instance; the Claude Desktop walkthroughs follow Microsoft's and Anthropic's deployment docs, with screenshots of the actual configuration dialogs.
 
 ---
 
@@ -27,9 +27,9 @@ The single most common confusion I see: people assume "Anthropic on Azure" is on
 
 The key point: **Cowork is not locked to Anthropic's infrastructure.** Claude Desktop has a third-party inference mode that routes every model call to your own Foundry resource — billed to your Azure account, with conversations stored locally on the device. That's the deployment enterprises actually want, and it's the least-known part of this whole story.
 
-What you're choosing between is *how your users reach Claude*: terminal, desktop app, or your own code. The governance boundary is the same for all three.
+What you're choosing between is *how your users reach Claude*: terminal, desktop app, or your own code. The governance boundary is the same for all three — and Part 5 puts a single gateway in front of all three, which is what turns a pilot into a rollout.
 
-One thing that table deliberately leaves out: the **Microsoft 365 connector**, which is about what Claude can *read* in your tenant rather than where it runs. Different boundary, different admin. Part 5.
+One thing that table deliberately leaves out: the **Microsoft 365 connector**, which is about what Claude can *read* in your tenant rather than where it runs. Different boundary, different admin. Part 6.
 
 ---
 
@@ -355,7 +355,443 @@ Also check the subscription type early. Claude models in Foundry require a paid 
 
 ---
 
-## Part 5 — The M365 connector: a different plane again
+## Part 5 — Claude behind your own gateway
+
+Everything so far has each client talking straight to the Foundry endpoint, holding the end user's own Entra credential. That's the right way to prove the thing works. It is not how you hand it to four hundred people.
+
+Here's the question I get, almost verbatim, in every second meeting:
+
+**"Our admin team wants to configure this once, centrally. Business users should open Claude Desktop and have it work. Developers should open Claude Code and have it work. Neither group should be touching endpoints, resource names, or keys."**
+
+That's a gateway. On Azure, that's API Management.
+
+And the piece most people don't know: **Claude Desktop has a first-class Gateway connection type**, sitting in the same dropdown as Foundry, Bedrock, and Vertex. Anthropic's own docs name Azure API Management as a supported gateway. This isn't a workaround — it's a shipped product feature with per-user sign-in built in.
+
+![Claude Desktop Connection dropdown showing the Gateway option alongside Foundry](images/10-claude-desktop-gateway-connection.png)
+
+**What the gateway actually buys you.** One place to decide who may call Claude. One place to cap what they spend. One place to attribute cost to a human rather than a shared secret. And one URL that survives you adding a second Foundry resource, moving a region, or splitting Opus and Haiku across deployments — none of which your users have to hear about.
+
+The request path is short. The user's Entra token reaches APIM. APIM validates the JWT, checks an app role, and then **replaces** that token with one minted from its own managed identity before calling Foundry.
+
+That replacement is the part to get right. The user's token must never reach Foundry — the audience is wrong, and forwarding it leaks a user credential to a backend that has no business holding one.
+
+```
+client sends    Authorization: Bearer <user's Entra token, aud = your API app>
+APIM validates  tenant, audience, and the Claude.User app role
+APIM sends      Authorization: Bearer <APIM's own token, aud = ai.azure.com>
+Foundry sees    a request from the gateway, on behalf of nobody in particular
+```
+
+Both Claude clients speak the native Anthropic Messages API, so the gateway must too. Claude Desktop's Gateway mode specifically requires `POST /v1/messages` in Anthropic shape, with `GET /v1/models` optional for model auto-discovery. That's convenient: one API definition, one policy, both clients.
+
+### Pick a tier before you pick anything else
+
+This decision gates everything and it is easy to get wrong on day one.
+
+APIM's AI gateway policies — `llm-token-limit`, `llm-emit-token-metric`, `llm-semantic-cache-lookup` — understand three request schemas: OpenAI Chat Completions, Google Vertex AI, and **the Anthropic Messages API, currently supported in API Management v2 tiers only**.
+
+"v2 tiers" means exactly **BasicV2**, **StandardV2**, **PremiumV2**. On Developer, Basic, Standard, Premium (classic), or Consumption, the Anthropic schema isn't listed. Consumption is doubly out: it supports neither `llm-token-limit` nor server-sent events, and both Claude clients stream everything.
+
+**And here's the trap that will cost you an afternoon:** `az apim create --sku-name` accepts only `Basic, Consumption, Developer, Isolated, Premium, Standard`. **The v2 SKUs cannot be created from the Azure CLI at all.** Bicep, ARM, or the portal — those are your options. Since v2 is a hard requirement for the Anthropic schema, the CLI path is closed before you start.
+
+While we're here: there is no `az apim api policy` command either. The only policy command in the entire `az apim` tree is `az apim graphql resolver policy`. Policies come from ARM, Bicep, or REST.
+
+### Provision it
+
+`sku.name` is case-sensitive with a capital `V` and no space, and `sku.capacity` is required.
+
+```bicep
+resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
+  name: apimName
+  location: location
+  sku: { name: 'StandardV2', capacity: 1 }
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    publisherEmail: publisherEmail
+    publisherName: publisherName
+  }
+}
+
+resource claudeApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
+  parent: apim
+  name: 'claude-anthropic'
+  properties: {
+    displayName: 'Claude (Anthropic Messages API)'
+    path: 'anthropic'
+    protocols: [ 'https' ]
+    serviceUrl: 'https://${foundryAccountName}.services.ai.azure.com/anthropic'
+    subscriptionRequired: false
+  }
+}
+```
+
+`subscriptionRequired: false` is deliberate. Authentication here is Entra ID. Layering an APIM subscription key on top reintroduces exactly the shared secret this design exists to remove.
+
+Then grant APIM's managed identity the right to run inference:
+
+```bicep
+// Cognitive Services User
+var cognitiveServicesUser = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+
+resource inferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: foundry
+  name: guid(foundry.id, apim.id, cognitiveServicesUser)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUser)
+    principalId: apim.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+```
+
+**Microsoft's docs contradict each other on this role, so be careful.** The generic APIM AI-authentication guidance tells you to assign **Cognitive Services OpenAI User**. That guidance is written for Azure OpenAI and it is *wrong for the `/anthropic` surface*. Foundry's own keyless-auth documentation is explicit: **Cognitive Services User** is the role that grants inference, and Owner and Contributor do not. `Foundry User` is the Foundry-native equivalent. Role IDs survived the recent role renames, so use GUIDs in IaC and ignore the display names. Assignments take up to five minutes to propagate — if your first call 403s, wait before you start debugging.
+
+One thing not to attempt: **managed-identity credentials on a `backends` resource in Bicep**. The portal offers it; the ARM template schema doesn't expose it, right through `2025-09-01-preview`. Do it in policy instead.
+
+### The policy
+
+Four moves, in order: prove who's calling, capture their identity, swap the credential, then meter.
+
+```xml
+<validate-azure-ad-token
+    tenant-id="{{entra-tenant-id}}"
+    header-name="Authorization"
+    failed-validation-httpcode="401"
+    output-token-variable-name="jwt">
+  <audiences>
+    <audience>{{claude-gateway-audience}}</audience>
+  </audiences>
+  <required-claims>
+    <claim name="roles" match="any">
+      <value>Claude.User</value>
+    </claim>
+  </required-claims>
+</validate-azure-ad-token>
+
+<set-variable name="callerOid"
+              value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;oid&quot;, &quot;unknown&quot;))" />
+
+<authentication-managed-identity
+    resource="https://ai.azure.com"
+    output-token-variable-name="foundry-token"
+    ignore-error="false" />
+<set-header name="Authorization" exists-action="override">
+  <value>@("Bearer " + (string)context.Variables["foundry-token"])</value>
+</set-header>
+
+<llm-token-limit
+    counter-key="@((string)context.Variables[&quot;callerOid&quot;])"
+    tokens-per-minute="20000"
+    estimate-prompt-tokens="false"
+    tokens-consumed-header-name="x-tokens-consumed" />
+```
+
+**Those `&quot;` entities are not me being fussy.** A policy expression sitting in an *attribute* cannot contain a raw double quote — it closes the attribute, and the document stops being well-formed XML. Microsoft's own policy documentation prints samples with raw quotes in exactly these positions, and they will not deploy as written. Expressions in *element* content — the `<value>` blocks — are unaffected, which is why the `set-header` above reads normally. Worth knowing before you spend twenty minutes staring at a validation error that just says the policy is malformed.
+
+**That audience value is not what you'd guess, and I got it wrong first.** If your app registration uses `requestedAccessTokenVersion: 2`, the `aud` claim is the **bare application ID** — not the `api://<guid>` identifier URI. Only v1 tokens carry the URI form. Decoding a real token settled it:
+
+```
+aud      11111111-2222-3333-4444-555555555555
+ver      2.0
+oid      aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+roles    ['Claude.User']
+```
+
+My first draft listed `api://…` and rejected every request. **Decode a token before you write the policy** — it takes ten seconds and saves an afternoon.
+
+One related snag while setting the app up: `az account get-access-token --resource api://<appId>` only works once you've added the Azure CLI's own client ID (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) to the app's `preAuthorizedApplications`. And the scope has to exist *before* you can pre-authorize it — doing both in one PATCH fails with `Property api.preAuthorizedApplications.delegatedPermissionIds has a Permission Id that cannot be found in the AppPermissions sets`. Two calls, in order.
+
+**Gate on an app role, not a group.** This is the single most common way to build a gateway that works in the pilot and fails in production. Entra caps the `groups` claim at **200 group object IDs**. Past that, it omits `groups` from the token entirely and substitutes `_claim_names` and `_claim_sources` pointing at Microsoft Graph — at which point `required-claims` fails closed, and every legitimate user in a large directory is locked out. App roles have no overage limit. If you must use groups, configure the optional claim as "Groups assigned to the application" to stay under the cap.
+
+**`resource="https://ai.azure.com"` — not `cognitiveservices.azure.com`.** Every APIM sample you'll find uses the latter, because every APIM sample is written for Azure OpenAI. Foundry's `/anthropic` surface wants scope `https://ai.azure.com/.default` — the same resource the cURL in Part 1 uses. No Microsoft document shows this value inside `authentication-managed-identity`, so I tested it. **It works:**
+
+```
+$ curl https://<apim>.azure-api.net/anthropic/v1/messages \
+    -H "Authorization: Bearer $TOK" -H "anthropic-version: 2023-06-01" ...
+{"model":"claude-opus-5","content":[{"type":"text","text":"through the gateway."}],
+ "usage":{"input_tokens":20,"output_tokens":8,...}}
+HTTP:200
+```
+
+APIM minted a token as itself, Foundry accepted it, and the gateway returned a real completion. Keep `ignore-error="false"` so a credential failure is loud rather than a silent unauthenticated forward.
+
+**Use `oid`, not email or UPN**, as your counter key and your metric dimension. Email changes. Object IDs don't.
+
+**The negative cases are worth running, because two of them look identical.** A request with no token and a request bearing a *valid token for the wrong audience* both return the same flat 401 with the same message. Nothing in the response mentions audiences:
+
+| Case | Result |
+|---|---|
+| Valid token with the `Claude.User` role | `200` |
+| No token | `401 Unauthorized. Access token is missing or invalid.` |
+| Valid token, wrong audience | `401` — byte-for-byte identical |
+
+That's the failure that reads as "the gateway is broken" when it's actually doing its job.
+
+Finally, one governance point straight from Microsoft's own documentation, which belongs in your design review rather than your runbook: *"Token forwarding is the customer's responsibility… API Management does not validate which backend the token is sent to."* Anyone holding `Microsoft.ApiManagement/service/apis/policies/write` can mint tokens as the gateway identity and send them wherever they like. The gateway concentrates trust — scope who can edit its policies accordingly.
+
+![APIM policy editor showing validate-azure-ad-token and authentication-managed-identity](images/11-apim-policy-editor.png)
+
+### Point Claude Code at it
+
+Two files, both pushed by the admin team, and the developer sets nothing.
+
+The first is a credential helper — a script whose only job is to print a fresh token and nothing else:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+az account get-access-token \
+  --resource "api://<application-id-uri>" \
+  --query accessToken --only-show-errors -o tsv
+```
+
+The contract is strict, and the failure modes are unhelpful if you break it: print **only** the credential to stdout. A banner, a prompt, or a stray CLI upgrade notice and the helper fails. Non-zero exit, timeout, or empty output fails the request after three attempts. Take longer than ten seconds and Claude Code shows a warning banner.
+
+The second is the managed settings file:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<apim-name>.azure-api.net/anthropic",
+    "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "2700000",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5"
+  },
+  "apiKeyHelper": "/usr/local/bin/claude-gateway-token"
+}
+```
+
+The `env` block is the lever that makes this a zero-touch rollout — it injects those variables into every session without anyone editing a shell profile. Model pins carry over from Part 3 for the same reason they mattered there: Foundry runs no startup model check, so a bad alias surfaces at the first prompt.
+
+The helper's default refresh is **five minutes**; Entra access tokens live about an hour. `2700000` ms — 45 minutes — keeps a margin without shelling out to `az` on every other prompt.
+
+Deploy it to the path for the platform, and note the Windows one:
+
+```
+macOS        /Library/Application Support/ClaudeCode/managed-settings.json
+Linux, WSL   /etc/claude-code/managed-settings.json
+Windows      C:\Program Files\ClaudeCode\managed-settings.json
+```
+
+**The legacy `C:\ProgramData\ClaudeCode\managed-settings.json` path is not read.** If you have older rollout scripts, they're writing to a file nothing opens.
+
+Managed settings sit at the top of the precedence chain — above the command line, above `.claude/settings.local.json`, above the project and user files — so a developer cannot accidentally point themselves back at the raw Foundry endpoint. `/status` confirms it, showing both the active provider and a **Setting sources** line reading `Enterprise managed settings (file)`.
+
+**One combination to avoid:** don't set `forceLoginMethod` or `forceLoginOrgUUID` alongside `apiKeyHelper`. Forced login blocks the helper at startup — *"organization membership can't be verified for an environment credential."* Pick the Entra flow or the forced-login flow, not both.
+
+### Point Claude Desktop at it
+
+Same Developer Mode route as Part 4 — **Help → Troubleshooting → Enable Developer Mode**, then **Developer → Configure Third-Party Inference…** — but this time set **Connection** to **Gateway** rather than Foundry.
+
+Then choose how users authenticate, and this is where Gateway mode earns its place. Instead of distributing a shared gateway key, set the credential kind to interactive and each user signs in with their own work account. First launch opens their browser at your normal Entra sign-in page; after that the app sends a per-user token to your gateway on every request. Conditional Access and MFA are enforced by Entra, exactly as they are for everything else your users touch.
+
+![Claude Desktop Gateway connection with OIDC sign-in configured](images/12-claude-desktop-gateway-oidc.png)
+
+The managed configuration keys, for pushing this without the UI:
+
+| Key | Value |
+|---|---|
+| `inferenceProvider` | `gateway` |
+| `inferenceGatewayBaseUrl` | Your APIM route |
+| `inferenceCredentialKind` | `interactive` |
+| `inferenceGatewayOidc` | A single JSON object — `clientId`, `issuer`, `scopes`, `bearerTokenType`, `resource`, `redirectPort` |
+| `inferenceGatewayOidcAuthFlow` | `browser` (default) or `broker` |
+| `inferenceModels` | One entry per deployment — or let the gateway serve the list. See below. |
+
+Note that `inferenceGatewayOidc` is delivered as **one JSON-string-valued key**, not as dotted sub-keys — that trips up MDM profiles built by hand.
+
+**Model discovery needs help.** Desktop probes `GET /v1/models` at launch to populate its picker, and **Foundry does not implement that endpoint** — it returns `404 api_not_supported`, the same way the Batches API does. Leave discovery on and every launch produces a failed probe:
+
+```
+Model discovery — Gateway /v1/models returned HTTP 404.
+404 https://<apim>.azure-api.net/anthropic/v1/models
+```
+
+You can just switch discovery off and list deployment names on each device. But the better answer is to make the gateway answer the question, which is what a gateway is for — put the list behind the same auth as everything else and no device needs one pushed to it:
+
+```xml
+<choose>
+  <when condition="@(context.Request.Method == &quot;GET&quot; &amp;&amp; context.Request.Url.Path.Contains(&quot;/models&quot;))">
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-body>{"data":[
+{"type":"model","id":"claude-opus-5","display_name":"Claude Opus 5","created_at":"2026-01-01T00:00:00Z"},
+{"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","created_at":"2025-10-01T00:00:00Z"}
+],"has_more":false,"first_id":"claude-opus-5","last_id":"claude-haiku-4-5"}</set-body>
+    </return-response>
+  </when>
+</choose>
+```
+
+Place it *after* `validate-azure-ad-token`, so an unauthenticated probe still gets a 401 rather than a free inventory of your deployments. Discovery then works, and adding a model to the fleet is a policy edit rather than an MDM push.
+
+The Entra app registration is a **public client**, redirect URI exactly `http://127.0.0.1/callback`, under **Mobile and desktop applications**. That's the same pair of traps from Part 4, with the same two error codes: `localhost` instead of `127.0.0.1` gives you `AADSTS50011`, and registering under **Web** gives you a browser success page, a failed app, and `AADSTS7000218` in the logs.
+
+**Choose `broker` if your customer has device-compliance Conditional Access.** It mints the token through the OS identity broker rather than a loopback browser flow, and it's the only option that satisfies policies requiring a compliant or managed device. It's Entra-only and unsupported on Linux.
+
+![Claude Desktop first-launch organisational sign-in prompt](images/13-claude-desktop-gateway-signin.png)
+
+Then **Export**, same as Part 4, for the `.mobileconfig` or `.reg`. And here is the thing to write on the whiteboard:
+
+**Claude Code's `managed-settings.json` and Claude Desktop's `.mobileconfig` are two entirely separate delivery channels.** Push one and forget the other, and that surface quietly keeps talking straight to Foundry — no error, no warning, just traffic bypassing every control you built. Your gateway metrics will look suspiciously light and you'll spend a week wondering why.
+
+Two smaller limits worth knowing. Desktop in Gateway mode runs sessions **locally only** — no SSH sessions, no Anthropic-hosted cloud environments, no Remote Control. And `inferenceGatewayAuthScheme` still accepts the values `sso` and `auto`, but only until **7 October 2026**; don't build new configuration on them.
+
+### The two-header problem, and `Bearer dummy`
+
+This is the part that cost me the most time, and it's in nobody's documentation.
+
+Wire up Claude Code exactly as above — `ANTHROPIC_BASE_URL` at the gateway, `apiKeyHelper` minting a token — and the first run fails:
+
+```
+$ claude -p "..." --model claude-opus-5
+Failed to authenticate. API Error: 401 Unauthorized. Access token is missing or invalid.
+```
+
+That message is *your own policy's* `failed-validation-error-message`, so the request reached APIM and was rejected there. The token is fine — I'd already proved it worked with cURL a minute earlier.
+
+Point `ANTHROPIC_BASE_URL` at a throwaway local server that just dumps headers, and the answer falls out:
+
+```
+POST /v1/messages?beta=true
+Authorization: Bearer dummy
+x-api-key: eyJ0eXAiOiJKV1QiLC...<2096 chars>
+anthropic-version: 2023-06-01
+```
+
+**Claude Code sends both headers.** The real credential rides in `x-api-key`; `Authorization` carries the literal string `Bearer dummy` as a placeholder. So the obvious normalisation — `set-header` with `exists-action="skip"` — never fires, because `Authorization` *does* exist. It just contains the word `dummy`, which `validate-azure-ad-token` then rejects on your behalf.
+
+Override only when `x-api-key` is actually present, which leaves Claude Desktop's traffic untouched:
+
+```xml
+<choose>
+  <when condition="@(context.Request.Headers.ContainsKey(&quot;x-api-key&quot;))">
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + context.Request.Headers.GetValueOrDefault("x-api-key", ""))</value>
+    </set-header>
+  </when>
+</choose>
+```
+
+Both shapes then pass, and the end-to-end run works:
+
+```
+$ claude -p "Reply with exactly: Claude Code is running through APIM."
+Claude Code is running through APIM.
+```
+
+**There's a second axis to watch, which I have not tested end to end.** Claude Desktop's OIDC config defaults to `bearerTokenType: id_token`, and an ID token's audience is the client ID — while Claude Code's helper yields an *access* token. If you point both at one route, make them agree: set Desktop's `bearerTokenType` to `access_token` with `resource` and `scopes` targeting the same app your helper script requests. One audience, one policy, both clients. Listing two audiences also works but widens what the gateway accepts, and I'd rather narrow it.
+
+### What the gateway can and cannot see
+
+Both Claude clients stream everything, and streaming constrains what a gateway can do.
+
+**Your token limit does not apply to your Claude clients at all.** I expected estimates. What I measured is worse than that, and it matters:
+
+```
+stream call 1: x-tokens-consumed: 14 | x-tokens-remaining: 20000
+stream call 2: x-tokens-consumed: 14 | x-tokens-remaining: 20000
+stream call 3: x-tokens-consumed: 14 | x-tokens-remaining: 20000
+non-stream   : x-tokens-consumed: 75 | x-tokens-remaining: 19925
+  actual usage from body: input 15, output 60, total 75
+```
+
+Three consecutive **streamed** calls each report the prompt count only, and the bucket never moves off its full 20,000. The non-streamed call that follows debits exactly 75 — its own usage and nothing else — which proves the three streams contributed **zero**.
+
+The mechanism is obvious once you see it: response headers go out before the body streams, so completion tokens don't exist yet at header time.
+
+Non-streamed accounting, by contrast, is exact — 75 consumed against 15 input + 60 output in the body. Not estimated. Exact.
+
+**So `tokens-per-minute` on this API constrains neither Claude client when they stream.** Use `llm-token-limit` for non-streaming application traffic, and do capacity control for the interactive clients at the Foundry deployment's TPM instead. If someone in the room assumes the gateway is capping developer spend, correct them before it reaches a design document.
+
+**But you can still account for every token — just not through that policy.** Turn on the `GatewayLlmLogs` diagnostic category and the gateway records prompt, completion, and total tokens per request, *including streamed ones*. A marker pair with known values:
+
+| Sent | Body usage | Logged total | `isStreamCompletion_b` |
+|---|---|---|---|
+| non-streamed | 14 in / 100 out | **114** | `False` |
+| streamed | 15 in / 100 out | **115** | `True` |
+
+Exact on both. So the throttle is blind to streams and the log is not — which is a strange split, but it means chargeback is achievable. Use the log for attribution, the policy for throttling non-interactive traffic.
+
+**Turn it on properly, and it's two resources.** An APIM-level diagnostic on the API to enable LLM logging, and an Azure Monitor diagnostic setting to route the category:
+
+```bicep
+resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {
+  parent: claudeApi
+  name: 'azuremonitor'
+  properties: {
+    loggerId: azureMonitorLogger.id
+    sampling: { samplingType: 'fixed', percentage: 100 }
+    #disable-next-line BCP037
+    largeLanguageModel: { logs: 'enabled' }
+  }
+}
+
+resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  scope: apim
+  name: 'claude-gateway-llm-logs'
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logAnalyticsDestinationType: 'Dedicated'
+    logs: [
+      { category: 'GatewayLlmLogs', enabled: true }
+      { category: 'GatewayLogs', enabled: true }
+    ]
+  }
+}
+```
+
+Then the query is clean, with real column names:
+
+```kusto
+ApiManagementGatewayLlmLog
+| project TimeGenerated, PromptTokens, CompletionTokens, TotalTokens,
+          IsStreamCompletion, ModelName
+```
+
+**Three things in those twenty lines will each cost you an hour.**
+
+`logAnalyticsDestinationType: 'Dedicated'` — this is the ARM equivalent of the CLI's `--export-to-resource-specific`. Omit it and Azure silently defaults to legacy *Azure diagnostics* mode, which writes every row into the catch-all `AzureDiagnostics` table instead. `ApiManagementGatewayLlmLog` then stays empty forever, which reads exactly like a broken pipeline. It isn't. Your data is there, under lowercase-with-suffix column names:
+
+```kusto
+AzureDiagnostics
+| where Category == "GatewayLlmLogs"
+| project promptTokens_d, completionTokens_d, totalTokens_d, isStreamCompletion_b
+```
+
+`largeLanguageModel` emits **Bicep warning BCP037** — the type definition doesn't know the property yet. The ARM API accepts it and it survives into the compiled template, so suppress the warning rather than dropping the property. Do check it's still in your ARM output before you trust the suppression.
+
+And the schema is narrower than it looks: `largeLanguageModel.requests.messages` and `.responses.messages` are rejected outright with `Invalid field ... specified`. Only `{ logs: 'enabled' }` is accepted. That's a happy accident — message-body capture buffers the response, and buffering breaks SSE, so the shape you're allowed is the shape you want.
+
+Rows for non-inference requests carry zeros and an empty `ModelName` — the `/v1/models` responder, 401s, and a `HEAD /anthropic/api/hello` probe Claude Desktop fires at startup. Join to `GatewayLogs` on `CorrelationId` for URL, method, and status.
+
+Streaming itself passes through cleanly with `buffer-response="false"` — `Content-Type: text/event-stream`, events relayed as produced.
+
+**The SSE rules are non-negotiable.** Set `buffer-response="false"` on `forward-request`, or events are held instead of relayed. Avoid `validate-content`, which buffers. Disable request and response body logging for Azure Monitor, Application Insights, and Event Hubs — and remember diagnostic settings at the All APIs scope apply to every API unless you override them per-API. There's a four-minute idle timeout enforced by the load balancer inside APIM, which is close enough to a long `effort: max` turn to be worth testing. That one I have not pushed to its limit.
+
+**`llm-emit-token-metric` has caps that fail silently.** Five dimensions, **100 unique values per dimension**, 1,000 active time series per namespace. Beyond that, data is discarded without an error. A dimension keyed on user OID is perfect for a fifty-person pilot and stops reporting somewhere around your hundredth user. Plan for aggregation by team, and keep per-user detail in logs rather than metrics.
+
+![Azure Monitor token metrics from the gateway, dimensioned per user](images/14-apim-token-metrics.png)
+
+Counters are also per gateway — they don't aggregate across regions or workspaces. And v2 tiers use a token bucket rather than a sliding window, so an initial burst equal to `tokens-per-minute` is allowed.
+
+### Two doors marked "Anthropic" that you should walk past
+
+APIM has grown a lot of AI surface recently, and two options look like they solve this problem but don't.
+
+**Unified model API (preview)** lists the Anthropic Messages API as a supported *backend* format, with managed identity auth and model aliases. Read closely though: it exposes an **OpenAI Chat Completions client surface**. Both Claude clients speak `/v1/messages`. Right idea, wrong end of the pipe.
+
+**The AI Gateway tier (preview)** does native Anthropic passthrough at `.../models/anthropic/v1/messages`, which sounds exactly right. But clients authenticate with a gateway runtime access key in an `api-key` header — not an Entra bearer token. That's the shared secret this entire design exists to eliminate, so it takes the per-user story with it. It's also East US 2 and Sweden Central only, with no SLA. Worth watching; not worth building on today.
+
+One last note on onboarding: the portal's **Import a Microsoft Foundry API** wizard offers Azure OpenAI, Azure AI, and Azure OpenAI v1 — none of which is `/anthropic`. Use **Language Model API → Create a passthrough API** and attach the `llm-*` policies yourself. Microsoft ships a dedicated import path for Amazon Bedrock and for Google Gemini. There isn't one for Anthropic yet.
+
+---
+
+## Part 6 — The M365 connector: a different plane again
 
 Everything so far has been about the **inference plane** — where the model runs. The Microsoft 365 connector is about the **data plane**: what Claude can reach inside your tenant. Mail, OneDrive, SharePoint, Teams, calendar, over MCP.
 
@@ -434,7 +870,7 @@ Revoking `Sites.Read.All`, for instance, cuts SharePoint access specifically. Ca
 
 **Rate limits — a real gap.** Foundry does **not** return Anthropic's `anthropic-ratelimit-*` headers. If your client backs off based on those headers, that logic is dead on Foundry. Implement exponential backoff on `429` and monitor through Azure instead. Deployment TPM is configurable per deployment in the same Edit pane where the hosting option lives.
 
-**Debugging.** Responses carry both `request-id` and `apim-request-id`. Capture both — you'll need them to trace an issue across Anthropic *and* Azure support.
+**Debugging.** Responses carry both `request-id` and `apim-request-id`. Capture both — you'll need them to trace an issue across Anthropic *and* Azure support. Note that `apim-request-id` comes from Foundry's own front door and appears whether or not you've put a gateway of your own in front, so don't read it as evidence that traffic went through your APIM.
 
 ---
 
@@ -444,6 +880,7 @@ Revoking `Sites.Read.All`, for instance, cuts SharePoint access specifically. Ca
 |---|---|
 | **Claude in Foundry, Hosted on Azure** | Regulated workloads, data-residency requirements, MACC drawdown, unified Azure governance. My default for Indian BFSI. |
 | **Claude in Foundry, Hosted on Anthropic** | You need a model or capability not yet on Azure infrastructure — Fable, Mythos, or the newest Opus. Still one Azure invoice. |
+| **Either of the above, behind APIM** | More than a pilot's worth of users. You need central config, per-user attribution, group-gated access, or spend caps — and you want admins configuring once rather than users configuring at all. |
 | **Claude API direct** | Fastest access to new features, no Azure relationship, or you need Admin/Batches/Managed Agents — none of which exist on Foundry. |
 
 Batch-heavy workloads deserve a flag: the **Message Batches API is not available on Foundry** — it returns `404 api_not_supported`. If your economics depend on batch pricing, Foundry is the wrong platform for that workload.
@@ -461,11 +898,22 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 7. **No rate-limit headers on Foundry.** Your backoff logic needs rewriting.
 8. **Entra tokens expire in ~1 hour.** Use a token provider, not a static token.
 9. **No Batches API, no Admin API, no Managed Agents** on Foundry.
-10. **Claude Desktop's browser sign-in wants literal `127.0.0.1`**, under **Mobile and desktop applications** — not `localhost`, not the **Web** platform.
-11. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
-12. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
-13. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
-11. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
+10. **Claude Desktop's browser sign-in wants literal `127.0.0.1`**, under **Mobile and desktop applications** — not `localhost`, not the **Web** platform. Same trap in Foundry mode and Gateway mode.
+11. **APIM needs a v2 tier** for the Anthropic schema — and `az apim create` can't make one. Bicep, ARM, or portal.
+12. **`authentication-managed-identity` wants `https://ai.azure.com`**, not `cognitiveservices.azure.com`. Every APIM sample shows the wrong one because every APIM sample is about OpenAI.
+13. **Gate on an app role, not a group.** Past 200 groups, Entra drops the `groups` claim entirely and your policy locks out everyone.
+14. **Raw double quotes inside a policy *attribute* are invalid XML.** Use `&quot;`. Microsoft's own samples get this wrong.
+15. **Claude Code sends `Authorization: Bearer dummy` *and* `x-api-key`.** A `skip`-based header normalisation never fires. Override on the presence of `x-api-key`.
+16. **The audience is the bare app ID on a v2 token**, not `api://<guid>`. Decode a real token before writing the policy.
+17. **A wrong-audience 401 is byte-identical to a no-token 401.** Nothing mentions audiences.
+18. **`llm-token-limit` doesn't debit the bucket on streamed traffic** — and both Claude clients stream. Cap at the Foundry deployment's TPM instead.
+19. **`GatewayLlmLogs` *does* count streamed tokens, exactly.** Use the log for chargeback, not the throttle policy.
+20. **Diagnostic settings default to the `AzureDiagnostics` table.** `ApiManagementGatewayLlmLog` stays empty unless you set `logAnalyticsDestinationType: 'Dedicated'` (CLI: `--export-to-resource-specific`).
+21. **Managed settings and the Desktop `.mobileconfig` are separate channels.** Push both or one surface silently bypasses your gateway.
+22. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
+23. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
+24. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
+25. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
 
 ---
 
@@ -473,13 +921,13 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 
 The interesting shift isn't that Claude runs on Azure. It's that the *governance boundary* and the *model choice* have finally been decoupled. You no longer trade one for the other.
 
-And it goes further than the API. A terminal agent, a desktop app running Cowork, and your own application code can all point at the same Foundry resource, under the same Entra identity, on the same invoice. That's a genuinely different conversation from "which model do we license."
+And it goes further than the API. A terminal agent, a desktop app running Cowork, and your own application code can all point at the same Foundry resource — or at one gateway in front of it — under the same Entra identity, on the same invoice. That's a genuinely different conversation from "which model do we license."
 
 For the customers I work with, that collapses a six-month procurement cycle into a deployment decision — one a platform team can make on a Tuesday afternoon with the security controls they already run.
 
 ---
 
-*The API, SDK, and Claude Code sections were executed against a live Foundry resource on 25 August 2026 — every response shown is real output. The Claude Desktop section follows the official Microsoft and Anthropic deployment guides. Foundry portal screenshots have tenant identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
+*The API, SDK, and Claude Code sections were executed against a live Foundry resource on 25 August 2026, and Part 5 against a live BasicV2 API Management instance in front of that same resource on 1 September 2026 — every response shown is real output, and `snippets/TEST-LOG.md` records what each call returned, including the two that contradicted my first draft. The Claude Desktop sections follow the official Microsoft and Anthropic deployment guides; **Claude Desktop in Gateway mode is the one path I have not driven end to end** — the gateway accepts its header shape, but no Desktop client has signed in through it. Foundry portal screenshots have tenant identifiers replaced. Capabilities move quickly — verify against your own deployment before you build on it.*
 
 **References**
 - [Claude in Microsoft Foundry is now generally available](https://azure.microsoft.com/en-us/blog/claude-in-microsoft-foundry-is-now-generally-available/)
@@ -489,6 +937,15 @@ For the customers I work with, that collapses a six-month procurement cycle into
 - [Configure Claude Code for Microsoft Foundry — Microsoft Learn](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-claude-code)
 - [Deploy Claude Desktop on 3P with Microsoft Foundry — Anthropic docs](https://claude.com/docs/third-party/claude-desktop/foundry)
 - [Configure Claude Desktop for Microsoft Foundry — Microsoft Learn](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-claude-desktop)
+- [Connect Claude Desktop to your own gateway — Anthropic docs](https://claude.com/docs/third-party/claude-desktop/gateway)
+- [Connect Claude Code to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)
+- [Claude Code managed settings](https://code.claude.com/docs/en/managed-settings)
+- [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities)
+- [`validate-azure-ad-token` policy reference](https://learn.microsoft.com/en-us/azure/api-management/validate-azure-ad-token-policy)
+- [`authentication-managed-identity` policy reference](https://learn.microsoft.com/en-us/azure/api-management/authentication-managed-identity-policy)
+- [`llm-token-limit` policy reference](https://learn.microsoft.com/en-us/azure/api-management/llm-token-limit-policy)
+- [Configure an API for server-sent events — Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/how-to-server-sent-events)
+- [Configure keyless authentication with Microsoft Entra ID — Microsoft Learn](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-entra-id)
 - [Claude Cowork](https://claude.com/product/cowork)
 - [Set up the Microsoft 365 connector — Anthropic Help Center](https://support.claude.com/en/articles/12542951-set-up-the-microsoft-365-connector)
 - [Microsoft 365 connector security guide — Anthropic Help Center](https://support.claude.com/en/articles/12684923-microsoft-365-connector-security-guide)

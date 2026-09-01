@@ -2,7 +2,7 @@
 
 A working guide to running Anthropic's Claude inside the Microsoft ecosystem — **Claude in Microsoft
 Foundry**, **Claude Code**, **Claude Desktop** (including how to run Cowork against your own Azure
-endpoint), and the **Microsoft 365 connector**.
+endpoint), **Azure API Management as an enterprise gateway**, and the **Microsoft 365 connector**.
 
 📖 **[Read the guide →](https://monuminu.github.io/claude-on-azure/)**
 
@@ -16,6 +16,9 @@ endpoint), and the **Microsoft 365 connector**.
   be your first support ticket
 - Configuring **Claude Desktop** in third-party inference mode — static API key for a pilot, Entra
   app registration for a real rollout, plus MDM export
+- Putting **Azure API Management** in front of Foundry so admins configure once and users just sign
+  in — per-user Entra auth, app-role gating, token limits, and the audience mismatch that silently
+  breaks one of the two clients
 - Setting up the **Microsoft 365 connector** by hand in Entra when your Global Admin has no Claude
   account, and the Conditional Access limitation that will break it
 - CCU billing, RBAC, monitoring, and a decision table for Foundry vs the direct Claude API
@@ -28,6 +31,11 @@ images/             screenshots (tenant identifiers replaced)
 snippets/
   01-curl-entra.sh  cURL against the Foundry Anthropic endpoint, Entra auth
   02-python-entra.py  AnthropicFoundry + DefaultAzureCredential
+  03-apim-claude-policy.xml   APIM inbound policy: Entra validation + MI backend auth
+  04-apim-gateway.bicep       APIM v2 + system identity + API + role assignment
+  05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
+  06-claude-code-managed-settings.json  admin-pushed Claude Code settings
+  07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
   TEST-LOG.md       what each call actually returned
 ```
 
@@ -41,6 +49,14 @@ The Claude Desktop section follows the official
 [Microsoft](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-claude-desktop)
 and [Anthropic](https://claude.com/docs/third-party/claude-desktop/foundry) deployment guides, with
 screenshots of the actual configuration dialog.
+
+**The API Management section was executed against a live BasicV2 gateway on 1 September 2026**,
+fronting the same Foundry resource. Findings 11–16 in `snippets/TEST-LOG.md` record it, including
+the two results that contradicted the first draft: the token audience is the bare application ID
+rather than `api://<guid>`, and Claude Code sends its credential in `x-api-key` while also sending
+a literal `Authorization: Bearer dummy` alongside it. Claude Desktop in Gateway mode is the one
+path not driven end to end — the gateway accepts its header shape, but no Desktop client has
+signed in through it.
 
 Cloud capabilities move quickly. Verify against your own deployment before building on anything here.
 

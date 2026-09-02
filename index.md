@@ -855,11 +855,16 @@ Read the two together in KQL:
 `User-Agent`, logged from the frontend request. Claude Code identifies itself as `claude-cli/<version>`; Claude Desktop sends its own string. Bucket into three, and keep a bucket for everything else — scripts and SDK calls hit the same gateway:
 
 ```kusto
-| extend Client = case(UA has "claude-cli",     "Claude Code",
-                       UA has "claude-desktop", "Claude Desktop",
-                       isempty(UA),             "Unknown",
+| extend Client = case(UA has "claude-cli",                     "Claude Code",
+                       UA has "Electron" and UA has "Claude/", "Claude Desktop",
+                       UA startswith "Bun/",                   "Claude Desktop",
+                       isempty(UA),                            "Unknown",
                        "Other")
 ```
+
+Those rules are worth reading carefully, because the obvious guess is wrong. Claude Code announces itself plainly — `claude-cli/2.1.246 (external, local-agent, agent-sdk/0.3.246)`. Claude Desktop does not: it's an Electron app, so it sends a browser-shaped string, `Mozilla/5.0 (Macintosh…) Claude/1.37937.2 Chrome/148.0.7778.280 Electron/42.10.0`. A rule matching `claude-desktop` never fires, and every Desktop request lands in `Other` while looking like it's working.
+
+You'll also see `Bun/1.4.1` issuing `HEAD /api/hello` and nothing else — Desktop's embedded runtime probing the gateway at startup. Zero tokens, but it inflates request counts if you leave it unclassified.
 
 Don't trust those literals blindly, including mine. User-Agent strings change between releases, and a rule that silently stops matching turns into a dashboard that quietly reports zero. The workbook includes a **raw User-Agent** table on its Health page for exactly this reason: anything landing in `Other` is a string your rule doesn't recognise yet.
 

@@ -2,7 +2,8 @@
 
 A working guide to running Anthropic's Claude inside the Microsoft ecosystem — **Claude in Microsoft
 Foundry**, **Claude Code**, **Claude Desktop** (including how to run Cowork against your own Azure
-endpoint), **Azure API Management as an enterprise gateway**, and the **Microsoft 365 connector**.
+endpoint), **Azure API Management as an enterprise gateway**, an **admin usage workbook**, and the
+**Microsoft 365 connector**.
 
 📖 **[Read the guide →](https://monuminu.github.io/claude-on-azure/)**
 
@@ -19,6 +20,8 @@ endpoint), **Azure API Management as an enterprise gateway**, and the **Microsof
 - Putting **Azure API Management** in front of Foundry so admins configure once and users just sign
   in — per-user Entra auth, app-role gating, token limits, and the audience mismatch that silently
   breaks one of the two clients
+- Building an **admin usage workbook** — per-developer token and cost reporting, Claude Code vs
+  Claude Desktop, and who is hitting their limits, from gateway logs that start out anonymous
 - Setting up the **Microsoft 365 connector** by hand in Entra when your Global Admin has no Claude
   account, and the Conditional Access limitation that will break it
 - CCU billing, RBAC, monitoring, and a decision table for Foundry vs the direct Claude API
@@ -36,6 +39,8 @@ snippets/
   05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
   06-claude-code-managed-settings.json  admin-pushed Claude Code settings
   07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
+  08-claude-usage-workbook.json  4-page admin workbook, 26 tiles
+  09-workbook.bicep           deploys the workbook against your workspace
 ```
 
 ## About the testing
@@ -56,8 +61,15 @@ while also sending a literal `Authorization: Bearer dummy` alongside it; and `ll
 throttle streamed traffic — an earlier draft said otherwise, on the strength of a test whose token
 bucket refilled faster than the debit could be observed.
 
+**The usage workbook was built and deployed against that live workspace on 2 September 2026.** All
+22 of its queries were executed against real data before it shipped. Getting there turned up four
+things worth knowing: the gateway logs carry no caller identity at all under Entra auth; a 429 never
+reaches the backend, so throttled requests are anonymous unless identity is also emitted on the
+response; `upn` does not exist in a v2 access token (`preferred_username` does); and `ModelName`
+arrives dated from the Claude clients but bare from cURL.
+
 One item is unresolved: `llm-emit-token-metric` produced no custom metric namespace, so per-user
-attribution in the guide relies on `GatewayLlmLogs`.
+attribution relies on `GatewayLlmLogs`.
 
 Cloud capabilities move quickly. Verify against your own deployment before building on anything here.
 

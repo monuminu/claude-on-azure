@@ -1,10 +1,10 @@
 ---
 layout: page
 title: "Claude on Azure: Wiring Anthropic Into the Microsoft Ecosystem"
-description: "A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, and Azure API Management as an enterprise gateway — including how to run Cowork on your own Azure endpoint."
+description: "A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, Azure API Management as an enterprise gateway, and an admin usage workbook — including how to run Cowork on your own Azure endpoint."
 ---
 
-*A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, API Management as a gateway, and the Microsoft 365 connector — including how to run Cowork on your own Azure endpoint.*
+*A working guide to Claude in Microsoft Foundry, Claude Code, Claude Desktop, API Management as a gateway, per-developer usage reporting, and the Microsoft 365 connector — including how to run Cowork on your own Azure endpoint.*
 
 I spend most of my week in front of Indian enterprises — banks, NBFCs, fintechs — who want frontier AI without handing a new vendor their data, their procurement cycle, and their compliance posture. For the last year the answer to "can we use Claude?" was awkward. It meant a separate contract, a separate invoice, and a separate conversation with the security team.
 
@@ -29,7 +29,7 @@ The key point: **Cowork is not locked to Anthropic's infrastructure.** Claude De
 
 What you're choosing between is *how your users reach Claude*: terminal, desktop app, or your own code. The governance boundary is the same for all three — and Part 5 puts a single gateway in front of all three, which is what turns a pilot into a rollout.
 
-One thing that table deliberately leaves out: the **Microsoft 365 connector**, which is about what Claude can *read* in your tenant rather than where it runs. Different boundary, different admin. Part 6.
+One thing that table deliberately leaves out: the **Microsoft 365 connector**, which is about what Claude can *read* in your tenant rather than where it runs. Different boundary, different admin. Part 7.
 
 ---
 
@@ -696,7 +696,7 @@ One call drained the bucket, the next were rejected, and `Retry-After` told the 
 
 ```xml
 <llm-token-limit
-    counter-key="@((string)context.Variables["callerOid"])"
+    counter-key="@((string)context.Variables[&quot;callerOid&quot;])"
     tokens-per-minute="20000"
     token-quota="2000000" token-quota-period="Monthly"
     estimate-prompt-tokens="false"
@@ -778,7 +778,144 @@ One last note on onboarding: the portal's **Import a Microsoft Foundry API** wiz
 
 ---
 
-## Part 6 — The M365 connector: a different plane again
+## Part 6 — Seeing who spent what
+
+The gateway gives an admin control. It does not, on its own, give them **visibility** — and the questions arrive within about a week of rollout:
+
+> What is Claude costing us this month? Who are the heavy users? Is anyone hitting their limit? How much of this is Claude Code versus Claude Desktop?
+
+Every one of those is answerable from logs the gateway already writes. There is just one problem to solve first.
+
+### The logs are anonymous
+
+`ApiManagementGatewayLlmLog` records tokens per request beautifully. It has no idea who made the request. And `ApiManagementGatewayLogs` — which does have `UserId` and `ApimSubscriptionId` columns — leaves both **empty**, because those are for APIM's own developer-portal users and subscription keys. This design deliberately uses neither. Authentication is an Entra bearer token, and nothing in either table records what was in it.
+
+So the first job is to put identity into the log. The policy already extracts the caller's `oid` for the token limit; stamp it onto the request as well:
+
+```xml
+<set-header name="x-caller-oid" exists-action="override">
+  <value>@((string)context.Variables["callerOid"])</value>
+</set-header>
+<set-header name="x-caller-upn" exists-action="override">
+  <value>@(((Jwt)context.Variables["jwt"]).Claims.GetValueOrDefault("preferred_username", "unknown"))</value>
+</set-header>
+```
+
+**`preferred_username`, not `upn`.** A v2 access token has no `upn` claim at all — the readable identity is `preferred_username`, with `name` alongside it for a display name. Reading `upn` here logs the literal string `unknown` for every user and looks like a permissions problem.
+
+Keep `oid` as the key you group by. It's immutable; an email address is not.
+
+Then tell the diagnostic which headers to record:
+
+```bicep
+frontend: {
+  request:  { headers: [ 'User-Agent' ] }
+  response: { headers: [ 'x-caller-oid' ] }
+}
+backend: {
+  request: { headers: [ 'x-caller-oid', 'x-caller-upn' ] }
+}
+```
+
+### Why identity is emitted twice
+
+`frontend.request.headers` logs what the **client** sent. `backend.request.headers` logs what APIM **forwarded**. Policy-set headers appear only in the second — which works fine until you look at a throttled request.
+
+A 429 never reaches the backend. There is no backend request, so there are no backend request headers, and the row is anonymous. That's precisely the row you care about, because "who is hitting their limit" is the question the throttle exists to answer.
+
+The fix is to emit the same header on the way out, from both `outbound` and `on-error`:
+
+```xml
+<on-error>
+  <base />
+  <set-header name="x-caller-oid" exists-action="override">
+    <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
+  </set-header>
+</on-error>
+```
+
+`on-error` is the section that actually runs when `llm-token-limit` rejects a request. With both paths in place, every request resolves:
+
+```
+FromReq  FromResp  Resolved  Code
+YES      YES       OK        200
+-        YES       OK        429
+```
+
+Read the two together in KQL:
+
+```kusto
+| extend OidReq  = tostring(BackendRequestHeaders["x-caller-oid"]),
+         OidResp = tostring(ResponseHeaders["x-caller-oid"])
+| extend Oid = iff(isempty(OidReq), OidResp, OidReq)
+```
+
+### Telling Claude Code from Claude Desktop
+
+`User-Agent`, logged from the frontend request. Claude Code identifies itself as `claude-cli/<version>`; Claude Desktop sends its own string. Bucket into three, and keep a bucket for everything else — scripts and SDK calls hit the same gateway:
+
+```kusto
+| extend Client = case(UA has "claude-cli",     "Claude Code",
+                       UA has "claude-desktop", "Claude Desktop",
+                       isempty(UA),             "Unknown",
+                       "Other")
+```
+
+Don't trust those literals blindly, including mine. User-Agent strings change between releases, and a rule that silently stops matching turns into a dashboard that quietly reports zero. The workbook includes a **raw User-Agent** table on its Health page for exactly this reason: anything landing in `Other` is a string your rule doesn't recognise yet.
+
+There's a second signal if you want corroboration. The `azp` claim names the application that minted the token — Claude Code through an `apiKeyHelper` shelling to `az` reports the Azure CLI's well-known client ID, while Desktop reports your own app registration.
+
+### One more trap in the model name
+
+`ModelName` does not arrive in one shape. The Claude clients pin dated model IDs, so you get `claude-haiku-4-5-20251001`; a hand-rolled cURL call sends `claude-haiku-4-5`. Group without normalising and the same model appears as two rows that never add up:
+
+```kusto
+| extend Model = replace_regex(ModelName, @"-\d{8}$", "")
+```
+
+### The workbook
+
+[`snippets/08-claude-usage-workbook.json`](https://github.com/monuminu/claude-on-azure/blob/main/snippets/08-claude-usage-workbook.json) is a four-page Azure Monitor workbook, deployed by [`09-workbook.bicep`](https://github.com/monuminu/claude-on-azure/blob/main/snippets/09-workbook.bicep):
+
+```bash
+az deployment group create -g <rg> -f 09-workbook.bicep \
+   -p logAnalyticsWorkspaceId=<workspace resource id>
+```
+
+| Page | Answers |
+|---|---|
+| **Overview** | Total tokens, requests, active developers, success rate. Tokens over time split by client. Share by model and by client. |
+| **People** | Top developers by tokens. Per-developer table — requests, prompt/completion split, models, clients, throttle count, last seen. Daily active developers. Month-to-date against quota. |
+| **Models & cost** | Tokens and cost per model over time. Cost per developer per model. Prompt-to-completion ratio, which is where an inefficient prompt template shows up. |
+| **Health** | Who is hitting limits. Outcome mix including 401s from misconfigured clients. Backend latency p50/p95/p99 per model. Streaming ratio. Requests over three minutes, against that four-minute idle timeout. Raw User-Agent strings. |
+
+Every query joins the two tables on `CorrelationId`, which is what carries status code and latency into the token data.
+
+**On cost.** The rates live in an editable `datatable` at the top of each query:
+
+```kusto
+let rates = datatable(Model:string, InPer1M:real, OutPer1M:real)[
+    "claude-opus-5",   15.0, 75.0,
+    "claude-sonnet-5",  3.0, 15.0,
+    "claude-haiku-4-5", 1.0,  5.0
+];
+```
+
+**These are placeholders.** Replace them with your own Foundry rates before anyone quotes a number from this. Cost tiles are hidden behind a parameter, so the default view is tokens only — which is a measurement rather than an estimate.
+
+And bear in mind what the estimate is built on: `GatewayLlmLogs` is exact per request, but it counts what the gateway saw, not what Foundry billed. Reconcile against Foundry's own usage before it becomes a chargeback line.
+
+### Before you turn this on
+
+Logging `preferred_username` puts **email addresses into Log Analytics**. That workspace now holds personal data, and it inherits a retention policy, an access review, and a conversation with whoever owns privacy in your organisation. This is a deliberate choice, not a default.
+
+If you'd rather not, drop the `x-caller-upn` header and keep `x-caller-oid`. Every tile still works; they show GUIDs, and you resolve names in Entra when you actually need to. For a chargeback report that runs monthly, that is often the better trade.
+
+Two more things worth saying out loud. Anyone who can edit the workbook can edit its queries, so treat workspace access as the real boundary. And usage data about named individuals invites performance questions it was never designed to answer — a token count measures a workflow, not an engineer.
+
+---
+
+## Part 7 — The M365 connector: a different plane again
 
 Everything so far has been about the **inference plane** — where the model runs. The Microsoft 365 connector is about the **data plane**: what Claude can reach inside your tenant. Mail, OneDrive, SharePoint, Teams, calendar, over MCP.
 
@@ -896,11 +1033,15 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 18. **`x-tokens-remaining` is stale on streamed 200s** — headers are emitted before the completion is charged, so a large `tokens-per-minute` makes the throttle look inert when it isn't. Test with a limit small enough to exhaust.
 19. **`GatewayLlmLogs` counts streamed tokens exactly; the throttle estimates them.** Use the log for chargeback, the policy for enforcement.
 20. **Create the diagnostic setting in resource-specific mode.** `ApiManagementGatewayLlmLog` is only populated when `logAnalyticsDestinationType` is `'Dedicated'` (CLI: `--export-to-resource-specific`).
-21. **Managed settings and the Desktop `.mobileconfig` are separate channels.** Push both or one surface silently bypasses your gateway.
-22. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
-23. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
-24. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
-25. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
+21. **Gateway logs have no caller identity of their own.** `UserId` and `ApimSubscriptionId` are empty under Entra auth — stamp `x-caller-oid` from the policy or every row is anonymous.
+22. **A 429 never reaches the backend**, so `backend.request.headers` is empty exactly on throttled requests. Emit identity from `outbound` *and* `on-error` too.
+23. **`upn` does not exist in a v2 access token.** Use `preferred_username`; reading `upn` logs `unknown` for everyone.
+24. **`ModelName` arrives dated from the Claude clients** (`claude-haiku-4-5-20251001`) and bare from cURL. Normalise before grouping or one model shows up as two.
+25. **Managed settings and the Desktop `.mobileconfig` are separate channels.** Push both or one surface silently bypasses your gateway.
+26. **The M365 connector is not governed by your Foundry deployment.** Different plane, different consent, different review.
+27. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
+28. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
+29. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
 
 ---
 

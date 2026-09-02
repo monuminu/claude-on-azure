@@ -71,6 +71,32 @@
     <set-variable name="callerOid"
                   value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;oid&quot;, &quot;unknown&quot;))" />
 
+    <!-- 2b. Stamp identity onto the request so it reaches the gateway logs.
+         Nothing else carries it: ApiManagementGatewayLlmLog has no caller column,
+         and GatewayLogs' UserId / ApimSubscriptionId are both empty when auth is
+         Entra rather than APIM subscription keys. Without these two headers every
+         row is anonymous and per-developer reporting is impossible.
+
+         Placed BEFORE llm-token-limit deliberately: a throttled request never
+         reaches the backend, and "who is hitting their limit" is exactly the
+         question you want answered.
+
+         preferred_username, NOT upn. A v2 access token
+         (requestedAccessTokenVersion: 2) has no upn claim at all - the readable
+         identity is preferred_username, with "name" carrying the display name.
+         Reading upn here logs the literal string "unknown" for every user.
+
+         PRIVACY: preferred_username is an email address. Enabling this puts
+         personal data in Log Analytics, and that workspace then inherits a
+         retention and access-control obligation. Drop the second header and
+         resolve oid in Entra at report time if you would rather it did not. -->
+    <set-header name="x-caller-oid" exists-action="override">
+      <value>@((string)context.Variables["callerOid"])</value>
+    </set-header>
+    <set-header name="x-caller-upn" exists-action="override">
+      <value>@(((Jwt)context.Variables["jwt"]).Claims.GetValueOrDefault("preferred_username", "unknown"))</value>
+    </set-header>
+
     <!-- 3. Mint the gateway's own token and OVERWRITE the user's.
          The user token must not reach Foundry: wrong audience, and forwarding it
          leaks a user credential to the backend.
@@ -167,9 +193,23 @@
 
   <outbound>
     <base />
+    <!-- Identity on the RESPONSE as well as the request. Required, not belt-and-braces:
+         a throttled request never reaches the backend, so backend.request.headers is
+         empty on every 429 and 403 - precisely the rows where "who hit their limit?"
+         is the question. VERIFIED: a 429 carries x-caller-oid only via this path.
+         Query the two together:
+           coalesce(BackendRequestHeaders['x-caller-oid'], ResponseHeaders['x-caller-oid']) -->
+    <set-header name="x-caller-oid" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
+    </set-header>
   </outbound>
 
   <on-error>
     <base />
+    <!-- on-error is what actually runs when llm-token-limit rejects. Without this
+         block, throttle events are anonymous. -->
+    <set-header name="x-caller-oid" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
+    </set-header>
   </on-error>
 </policies>

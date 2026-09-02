@@ -151,6 +151,20 @@ resource azureMonitorLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01'
 // Supplying largeLanguageModel.requests.messages / .responses.messages is rejected
 // with "Invalid field ... specified". Leaving them unset is also what you want —
 // message-body capture buffers the response, and buffering breaks SSE.
+//
+// The header lists are what make per-developer reporting possible. Neither log table
+// carries caller identity on its own: GatewayLlmLogs has no caller column, and
+// GatewayLogs' UserId / ApimSubscriptionId are empty under Entra auth. VERIFIED:
+//   frontend.request.headers  - what the CLIENT sent. User-Agent lands here, and it
+//                               is how Claude Code is told apart from Claude Desktop.
+//                               Policy-set headers do NOT appear here.
+//   backend.request.headers   - what APIM FORWARDS, so the policy's x-caller-* headers
+//                               land here. Empty on 429/403: a throttled request never
+//                               reaches the backend.
+//   frontend.response.headers - the fallback that covers throttled requests, populated
+//                               from the outbound and on-error sections of the policy.
+// Query identity as:
+//   coalesce(BackendRequestHeaders['x-caller-oid'], ResponseHeaders['x-caller-oid'])
 resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {
   parent: claudeApi
   name: 'azuremonitor'
@@ -159,6 +173,19 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
     sampling: {
       samplingType: 'fixed'
       percentage: 100
+    }
+    frontend: {
+      request: {
+        headers: [ 'User-Agent' ]
+      }
+      response: {
+        headers: [ 'x-caller-oid' ]
+      }
+    }
+    backend: {
+      request: {
+        headers: [ 'x-caller-oid', 'x-caller-upn' ]
+      }
     }
     // Bicep's type definition for DiagnosticContractProperties does not yet know
     // about largeLanguageModel and emits BCP037. The ARM API accepts it — verified

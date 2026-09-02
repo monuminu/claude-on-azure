@@ -41,6 +41,11 @@ snippets/
   07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
   08-claude-usage-workbook.json  4-page admin workbook, 26 tiles
   09-workbook.bicep           deploys the workbook against your workspace
+  10-claude-usage-summary-rule.bicep  hourly rollup, for history past raw retention
+  11-grafana.bicep            Azure Managed Grafana + RBAC (billable, ~$31/month)
+  11a-grafana-workspace-rbac.bicep    cross-resource-group role assignment module
+  12-claude-usage-grafana-dashboard.json  16-panel Grafana dashboard
+  13-import-grafana-dashboard.sh  imports it (no ARM path for AMG dashboards)
 ```
 
 ## About the testing

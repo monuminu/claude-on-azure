@@ -1,11 +1,13 @@
 // Azure Managed Grafana in front of the Claude gateway logs.
 //
 // COST WARNING: this is the only billable resource in this repo, and it recurs.
-// East US retail at time of writing:
-//   Essential  $6/user/month, no node charge          <- default here
-//   Standard   $0.0342/hour node (~$25/month) + $6/user/month
-// Essential has no SLA and a reduced feature set. Choose Standard if you need
-// the SLA, Grafana-native alerting at scale, or additional plugins.
+// East US retail at time of writing: $0.0342/hour node (~$25/month) + $6/user/month.
+//
+// An 'Essential' SKU appears in the Azure retail price list at $6/user/month with no
+// node charge, but ARM REJECTS IT - "The Grafana Workspace sku name 'Essential' is not
+// a supported value. Supported sku values are: Standard" - on every api-version from
+// 2024-10-01 through 2026-09-01, and in eastus, westus2, centralus and westeurope.
+// Treat it as unavailable unless your subscription is allowlisted. Budget for Standard.
 //
 //   az provider register --namespace Microsoft.Dashboard        # NOT registered by default
 //   az deployment group create -g <rg> -f 11-grafana.bicep \
@@ -27,9 +29,9 @@ param logAnalyticsWorkspaceId string
 @description('Object ID of the principal who should administer Grafana. Without this you can deploy the instance but not open it.')
 param adminPrincipalId string
 
-@description('Essential is per-user only. Standard adds a node charge and an SLA.')
-@allowed([ 'Essential', 'Standard' ])
-param skuName string = 'Essential'
+@description('Standard is the only SKU ARM accepts today; see the note above about Essential.')
+@allowed([ 'Standard' ])
+param skuName string = 'Standard'
 
 param location string = resourceGroup().location
 
@@ -52,23 +54,17 @@ resource grafana 'Microsoft.Dashboard/grafana@2024-10-01' = {
   }
 }
 
-// Existing-resource references so the role assignments can be scoped correctly.
-resource workspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
-  name: last(split(logAnalyticsWorkspaceId, '/'))
-}
-
-// Monitoring Reader — what lets Grafana's managed identity actually run KQL against the
-// workspace. Omit it and the instance deploys fine, then every panel returns a
-// permissions error that reads like a broken datasource.
-var monitoringReader = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
-
-resource grafanaReadsLogs 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: workspace
-  name: guid(workspace.id, grafana.id, monitoringReader)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringReader)
-    principalId: grafana.identity.principalId
-    principalType: 'ServicePrincipal'
+// Monitoring Reader on the workspace, via a module: the workspace is typically in a
+// different resource group from Grafana, and Bicep rejects a cross-resource-group role
+// assignment with BCP139. The module targets the workspace's own resource group, parsed
+// out of the resource ID so the caller still passes only one value.
+module workspaceRbac './11a-grafana-workspace-rbac.bicep' = {
+  name: 'grafana-monitoring-reader'
+  scope: resourceGroup(split(logAnalyticsWorkspaceId, '/')[4])
+  params: {
+    workspaceName: last(split(logAnalyticsWorkspaceId, '/'))
+    grafanaPrincipalId: grafana.identity.principalId
+    grafanaResourceId: grafana.id
   }
 }
 

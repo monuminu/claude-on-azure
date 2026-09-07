@@ -4,3 +4,7 @@ _site/
 Gemfile.lock
 vendor/
 .DS_Store
+__pycache__/
+# draw.io desktop writes these while a diagram is open
+.$*.bkp
+.$*.dtmp

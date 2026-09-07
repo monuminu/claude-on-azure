@@ -488,6 +488,8 @@ Four moves, in order: prove who's calling, capture their identity, swap the cred
 
 **Those `&quot;` entities are not me being fussy.** A policy expression sitting in an *attribute* cannot contain a raw double quote — it closes the attribute, and the document stops being well-formed XML. Microsoft's own policy documentation prints samples with raw quotes in exactly these positions, and they will not deploy as written. Expressions in *element* content — the `<value>` blocks — are unaffected, which is why the `set-header` above reads normally. Worth knowing before you spend twenty minutes staring at a validation error that just says the policy is malformed.
 
+That is the abridged version — the four moves that make the gateway work. The file in [`snippets/03-apim-claude-policy.xml`](snippets/03-apim-claude-policy.xml) has grown since: it also derives a tier from the `roles` claim, checks two rejection conditions, and runs one `llm-token-limit` per tier. Those additions are covered later in this part and in [TIERED-QUOTAS.md](TIERED-QUOTAS.md), and unlike everything in this section they have not been deployed.
+
 **That audience value is not what you'd guess.** If your app registration uses `requestedAccessTokenVersion: 2`, the `aud` claim is the **bare application ID** — not the `api://<guid>` identifier URI. Only v1 tokens carry the URI form. Decode a token and check before you write the policy:
 
 ```
@@ -711,7 +713,30 @@ Periods are `Hourly`, `Daily`, `Weekly`, `Monthly`, `Yearly`. Exhausting a quota
 
 Both limits can run on one policy: the rate protects the backend from bursts, the quota holds the monthly budget.
 
-**Account for tokens with `GatewayLlmLogs`, not with the throttle.** On streamed requests `llm-token-limit` works from *estimated* token counts — good enough to enforce a budget, not good enough to bill against. The log records prompt, completion, and total tokens per request and is exact on streamed calls, with `IsStreamCompletion` marking which is which. So: policy for enforcement, log for chargeback.
+**One limit is rarely the requirement, though.** The moment this works, someone asks for three tiers — a bigger allowance for the team that lives in Claude Code all day, a smaller one for occasional users. The tempting answer is APIM **products**, one per tier, which is exactly how Microsoft's own [FinOps framework lab](https://github.com/Azure-Samples/AI-Gateway/tree/main/labs/finops-framework) does it. It does not work here, for a reason worth knowing before you spend a day on it: **APIM resolves the product from the subscription key on the wire, before the policy pipeline runs.** There is nothing you can do in policy to select a product from a claim. And you cannot have three keyless ones either — *"an API can be associated with at most one open product."* Products mean subscription keys, and subscription keys mean the shared secret this design exists to remove.
+
+App roles work instead, because the tier arrives in the token you are already validating:
+
+```xml
+<set-variable name="callerTier" value="@{
+    var r = (string[])context.Variables[&quot;callerRoles&quot;];
+    if (System.Array.IndexOf(r, &quot;Claude.Tier.Pro&quot;) >= 0) { return &quot;pro&quot;; }
+    if (System.Array.IndexOf(r, &quot;Claude.Tier.Basic&quot;) >= 0) { return &quot;basic&quot;; }
+    return &quot;lite&quot;;
+}" />
+```
+
+Three things about that snippet are load-bearing:
+
+- **Do not reuse the `GetValueOrDefault` idiom** you used for `oid`. That overload *"returns comma-separated claim values"*, so a multi-valued `roles` claim comes back as `"Claude.User,Claude.Tier.Pro"` — and `.Contains()` on that string is a substring test that would also match a `Claude.Tier.ProPlus` you add next year. `Claims` is `IReadOnlyDictionary<string, string[]>`; take the array and match elements.
+- **Falling through to the cheapest tier is the safe default.** A token with `Claude.User` and no tier role gets Lite, not unlimited.
+- **`tokens-per-minute` does not accept policy expressions.** Only `counter-key`, `token-quota` and `token-quota-period` do. So you cannot parameterise one `llm-token-limit`; you need one per tier inside a `<choose>`, with the numbers as named values — substitution there is textual and happens before the attribute is interpreted.
+
+And prefix the counter key with the tier. The v2 tiers use a token bucket, and the docs warn that reusing one counter key with inconsistent `tokens-per-minute` values *"can cause unpredictable behavior"*. The cost of prefixing is that moving someone between tiers mints a fresh counter and a fresh monthly allowance — which is a good argument for making dollars, not tokens, the control you actually enforce.
+
+[TIERED-QUOTAS.md](TIERED-QUOTAS.md) works that through end to end, including why a per-developer dollar budget needs a second mechanism entirely.
+
+**Use `GatewayLlmLogs` for the token categories it actually reports.** Matched wire/log tests found exact uncached input and output counts even on streamed calls. The `llm-token-limit` throttle uses estimates on streams and is an approximate fairness control. `IsStreamCompletion` is unreliable: a real streamed Claude Code request logged `False`. Exact reported counts do not imply complete billing — cache writes are absent, and the Log Analytics table also drops cache reads. See [the cache-token analysis](CACHE-TOKEN-ANALYSIS.md).
 
 **Turn it on properly, and it's two resources.** An APIM-level diagnostic on the API to enable LLM logging, and an Azure Monitor diagnostic setting to route the category:
 
@@ -745,6 +770,7 @@ Then the query is clean, with real column names:
 
 ```kusto
 ApiManagementGatewayLlmLog
+| where isnotempty(RequestId)
 | project TimeGenerated, PromptTokens, CompletionTokens, TotalTokens,
           IsStreamCompletion, ModelName
 ```
@@ -890,25 +916,25 @@ az deployment group create -g <rg> -f 09-workbook.bicep \
 | Page | Answers |
 |---|---|
 | **Overview** | Total tokens, requests, active developers, success rate. Tokens over time split by client. Share by model and by client. |
-| **People** | Top developers by tokens. Per-developer table — requests, prompt/completion split, models, clients, throttle count, last seen. Daily active developers. Month-to-date against quota. |
+| **People** | Top developers by tokens. Per-developer table — requests, prompt/completion split, models, clients, throttle count, last seen. Daily active developers. Month-to-date dollars against the tier budget, with tokens as the secondary signal. Spend per tier. Who is currently blocked by the budget loop. |
 | **Models & cost** | Tokens and cost per model over time. Cost per developer per model. Prompt-to-completion ratio, which is where an inefficient prompt template shows up. |
-| **Health** | Who is hitting limits. Outcome mix including 401s from misconfigured clients. Backend latency p50/p95/p99 per model. Streaming ratio. Requests over three minutes, against that four-minute idle timeout. Raw User-Agent strings. |
+| **Health** | Who is hitting limits, and *which* limit — the three rejection reasons are separated by `x-claude-denied-by`, because "spent their budget", "an admin stopped them" and "burned the token backstop" are not the same event. Outcome mix including 401s from misconfigured clients. Backend latency p50/p95/p99 per model. APIM stream flag (unreliable). Requests over three minutes, against that four-minute idle timeout. Raw User-Agent strings. |
 
 Every query joins the two tables on `CorrelationId`, which is what carries status code and latency into the token data.
 
-**On cost.** The rates live in an editable `datatable` at the top of each query:
+**On cost.** The rates used to live in an editable `datatable` at the top of each query — which meant twenty copies of the same price list, and twenty places to be wrong. They now come from a `PRICING_CL` table, loaded from a maintained Claude price list by [`15-load-pricing.py`](snippets/15-load-pricing.py):
 
 ```kusto
-let rates = datatable(Model:string, InPer1M:real, OutPer1M:real)[
-    "claude-opus-5",   15.0, 75.0,
-    "claude-sonnet-5",  3.0, 15.0,
-    "claude-haiku-4-5", 1.0,  5.0
-];
+let rates = PRICING_CL
+    | summarize arg_max(TimeGenerated, *) by Model
+    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;
 ```
 
-**These are placeholders.** Replace them with your own Foundry rates before anyone quotes a number from this. Cost tiles are hidden behind a parameter, so the default view is tokens only — which is a measurement rather than an estimate.
+The loader stores prices per 1K tokens, so the arithmetic divides by 1,000 rather than 1,000,000. Claude prices are absent from the retail API; update the maintained list to match your agreement. If you have queries of your own against this workspace, they need the same change — mixing the two units is a thousand-fold error that still looks like a plausible number.
 
-And bear in mind what the estimate is built on: `GatewayLlmLogs` is exact per request, but it counts what the gateway saw, not what Foundry billed. Reconcile against Foundry's own usage before it becomes a chargeback line.
+Cost tiles are hidden behind a parameter, so the default view is tokens only — which is a measurement rather than an estimate.
+
+The workbook's cost is incomplete. `ApiManagementGatewayLlmLog` contains uncached input and output only; it has no cache-token columns. Cache reads cost 0.1× input for the current models, while writes cost **1.25× for 5m TTL and 2× for 1h TTL**. The Event Hub processor includes reads from `promptCachedTokens`, but still misses writes, so its Redis budget counter differs from workbook cost. In the measured seven-day sample, writes accounted for 62% of Opus 5 spend. Foundry metrics expose exact aggregate read/write totals, including TTL, but no caller identity. Reconcile those totals as a shared cost pool; do not claim that per-user bill or budget coverage is complete. [CACHE-TOKEN-ANALYSIS.md](CACHE-TOKEN-ANALYSIS.md) reviews attribution limits and a streaming meter design.
 
 ### Before you turn this on
 
@@ -917,6 +943,16 @@ Logging `preferred_username` puts **email addresses into Log Analytics**. That w
 If you'd rather not, drop the `x-caller-upn` header and keep `x-caller-oid`. Every tile still works; they show GUIDs, and you resolve names in Entra when you actually need to. For a chargeback report that runs monthly, that is often the better trade.
 
 Two more things worth saying out loud. Anyone who can edit the workbook can edit its queries, so treat workspace access as the real boundary. And usage data about named individuals invites performance questions it was never designed to answer — a token count measures a workflow, not an engineer.
+
+### From reporting to enforcement
+
+The workbook answers "who spent what". The next question — "and stop them when they've spent enough" — is a different problem, because **APIM has no cost-limit policy**. `llm-token-limit` counts tokens, and per its own documentation *"the policy currently counts prompt and completion tokens only."* A token quota is not a dollar budget: at Opus 5 output rates, a million tokens is $25; at Haiku rates it's $5. One number cannot mean both.
+
+At a few dozen developers you can paper over that. At a hundred thousand you cannot, and most of the obvious machinery falls away at once: an APIM named value caps at 4096 characters, which is about 110 object IDs; a per-user Azure Monitor alert dimension is capped at 6,000 alerts per evaluation and the docs explicitly warn against *"GUIDs or other high-cardinality"* split dimensions; and a custom metric dimension stops at 100 unique values, after which *"the corresponding metric data is silently discarded"* — the worst failure mode of the three, because nothing tells you.
+
+What survives is the gateway itself and something with atomic counters behind it. [TIERED-QUOTAS.md](TIERED-QUOTAS.md) is the design: per-tier token limits in policy as the synchronous backstop, a near-real-time dollar flag in Redis fed by an Event Hub diagnostic destination, and an Entra app role as the manual admin lever. The one non-obvious choice in it is that the usage events come from a **diagnostic destination rather than an outbound policy** — because `buffer-response="false"` means outbound fires when the response *starts*, and both Claude clients stream every request, so an outbound "publish usage" would report on nothing.
+
+The auth half of the gateway in Part 5 is verified against a live instance. That design is not — it compiles and every constraint in it is quoted from documentation, but none of it has been deployed.
 
 ---
 
@@ -1047,6 +1083,19 @@ Batch-heavy workloads deserve a flag: the **Message Batches API is not available
 27. **Location-based Conditional Access breaks the M365 connector entirely** — it blocks every user, not just off-network ones.
 28. **`entra.admin.com` in the connector docs is a dead domain.** Use `entra.microsoft.com`.
 29. **Check the subscription type on day one.** Credit-only sponsored, CSP, student, and trial subscriptions can't buy Claude models at all.
+30. **APIM products can't be selected from a claim.** The product is resolved from the subscription key before the policy pipeline runs, and an API can have at most one *open* product — so tiering by product means shared secrets, not app roles.
+31. **`Claims.GetValueOrDefault` returns comma-separated values, not the first one.** On a multi-valued `roles` claim that turns `.Contains()` into a substring match. Take the `string[]` and compare elements.
+32. **`tokens-per-minute` doesn't accept policy expressions** — unlike `counter-key`, `token-quota` and `token-quota-period`. One `llm-token-limit` per tier, with the numbers as named values.
+33. **Don't reuse one `counter-key` across different `tokens-per-minute` values.** The v2 token bucket behaves unpredictably. Prefix the key with the tier — and accept that a tier change hands out a fresh allowance.
+34. **`return-response` skips `outbound` *and* `on-error`.** Any identity header you set earlier never reaches the client, so a deliberate 403 is anonymous unless you re-set the headers inside the `return-response` itself.
+35. **You can't publish usage from an outbound policy when you're streaming.** `buffer-response="false"` means outbound fires on response *start*, before the token counts exist. Use an Event Hub diagnostic destination, which is written after the stream ends.
+36. **Cache writes are absent from gateway diagnostics.** The Log Analytics table also drops cache reads, while Event Hub carries reads in `promptCachedTokens`. `PromptTokens` is uncached-only. Writes bill at 1.25× for 5m TTL and 2× for 1h; reads at 0.1× for the current models. Foundry metrics expose exact aggregate cache counts, but no user identity. Per-user chargeback needs response usage captured by a streaming meter; APIM response-body buffering breaks SSE.
+37. **Per-user Azure Monitor alert dimensions don't scale.** 6,000 alerts per evaluation, 300 if stateful, and the docs warn against GUIDs as split dimensions. Nor do custom metric dimensions — past 100 unique values the data is *silently discarded*.
+38. **An APIM named value maxes out at 4096 characters.** That's roughly 110 object IDs, which rules it out as a blocklist for anything but a pilot.
+39. **Group-based app role assignment needs Entra ID P1/P2, and ignores nested groups.** Members of a group nested inside an assigned group get nothing.
+40. **Group membership is not a Continuous Access Evaluation trigger.** Suspending someone by app role applies on their *next* token, not the current one — so it's an admin lever, not a fast stop.
+41. **Take Claude prices from the pricing table, not the model name.** $15/$75 per MTok is Opus 4.1 and Opus 4, both retired — Opus 5 is $5/$25, and Sonnet 5 is $2/$10. Loading the retired rate overstated a live cost ledger by 2.86×, which would suspend developers at a third of their real budget.
+42. **Foundry bills Claude in Consumption Units, not meters.** Anthropic rates usage in USD at list, applies your discount, converts at $0.01/CCU and reports hourly to Azure Marketplace — which is why Claude appears nowhere in the Azure retail prices API, and why the list price is nonetheless the right basis for a cost model.
 
 ---
 

@@ -1,17 +1,44 @@
 <!--
-  APIM inbound policy: per-user Entra ID auth in front of Claude on Microsoft Foundry.
+  APIM inbound policy: per-user Entra ID auth and per-developer tiered budgets in front
+  of Claude on Microsoft Foundry.
 
-  STATUS: VERIFIED. Deployed to a live BasicV2 instance on 2026-09-01 and exercised
-  with cURL and Claude Code end to end. Both former unknowns are now settled:
-    (a) resource="https://ai.azure.com" is correct - Foundry accepts the token
-    (b) llm-token-limit DOES throttle streamed traffic. Both tokens-per-minute
-        (429) and token-quota (403) fire on the streams both Claude clients send.
-        Counts are estimated on streams and exact on non-streamed calls.
+  STATUS: VERIFIED against a live BasicV2 gateway. Auth on 2026-09-01; tiering and the
+  budget check on 2026-09-04, on the same instance. What was actually exercised:
+
+    - a named value DOES resolve inside a numeric attribute. tokens-per-minute
+      "{{tier-lite-tpm}}" reported x-tokens-remaining 3978 against a 4000 limit, and
+      "{{tier-pro-tpm}}" reported 39986 against 40000. This was the design's biggest
+      unknown and it holds.
+    - the roles claim parses, and precedence works: a token carrying BOTH Claude.User
+      and Claude.Tier.Pro selected "pro", not the first-listed role.
+    - the fallback is real: a token with Claude.User and no tier role selected "lite"
+      and was metered at 4000/35,000,000.
+    - the tier-prefixed counter keys are genuinely separate buckets - the same user
+      showed a 35,000,000 quota as Lite and a 350,000,000 quota as Pro.
+    - Claude.Suspended returned 403 with x-claude-denied-by: admin, AND carried
+      x-caller-oid and x-caller-tier. That last part is the whole reason those headers
+      are repeated inside return-response; without them the row is anonymous.
+    - the budget check fails open. Pointed at an unreachable host it added no measurable
+      latency and every request still returned 200.
+    - x-caller-tier reaches ApiManagementGatewayLogs once the API diagnostic lists it.
+
+  STILL UNVERIFIED: the 429 path with tier headers attached (no burst was triggered),
+  and the budget 403 - there is no budget API deployed yet, so step 5 has only ever
+  taken its fail-open branch. See TIERED-QUOTAS.md.
 
   Scope: attach to an API whose serviceUrl is
   https://<resource>.services.ai.azure.com/anthropic
   Requires an API Management v2 tier (BasicV2 / StandardV2 / PremiumV2) for the
   llm-* policies to understand the Anthropic Messages schema.
+
+  Note: avoid writing a doubled-brace named value reference inside these comments.
+  Substitution is textual across the whole document, comments included, so an example
+  that names a value you have not created will fail the deployment.
+
+  THREE CONTROLS REJECT TRAFFIC HERE, and telling them apart matters operationally:
+    403 x-claude-denied-by: admin   - step 4, Entra Claude.Suspended role
+    403 x-claude-denied-by: budget  - step 5, month-to-date dollars over the tier cap
+    429 / 403 (no denied-by header) - step 8, llm-token-limit rate or token quota
 -->
 <policies>
   <inbound>
@@ -39,7 +66,8 @@
          Gate on an app role, not a group. The groups claim is capped at 200 object
          IDs; past that Entra omits it entirely and emits _claim_names/_claim_sources,
          at which point required-claims fails closed for legitimate users.
-         App roles have no overage limit. -->
+         App roles have no overage limit — which is also why the tier and suspension
+         signals below are app roles rather than groups. -->
     <validate-azure-ad-token
         tenant-id="{{entra-tenant-id}}"
         header-name="Authorization"
@@ -71,13 +99,52 @@
     <set-variable name="callerOid"
                   value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;oid&quot;, &quot;unknown&quot;))" />
 
-    <!-- 2b. Stamp identity onto the request so it reaches the gateway logs.
+    <!-- 2a. The roles array, parsed ONCE. Both the tier and the suspension flag come
+         out of it, so neither costs a lookup, a cache read, or a network call.
+
+         Do NOT reach for the GetValueOrDefault idiom used for oid above. That overload
+         returns COMMA-SEPARATED claim values, so for a multi-valued roles claim it hands
+         back "Claude.User,Claude.Tier.Pro" — and .Contains() on that string is a
+         substring test that would also match a hypothetical Claude.Tier.ProPlus.
+         Claims is IReadOnlyDictionary<string, string[]>; take the array.
+
+         ContainsKey + indexer rather than TryGetValue: no out-parameter, which keeps
+         this inside the most conservative reading of what the expression compiler
+         accepts. Array.IndexOf rather than LINQ Contains for the same reason — and it
+         is an exact element match either way, which is the point. -->
+    <set-variable name="callerRoles" value="@{
+        var jwt = (Jwt)context.Variables[&quot;jwt&quot;];
+        if (!jwt.Claims.ContainsKey(&quot;roles&quot;)) { return new string[0]; }
+        var r = jwt.Claims[&quot;roles&quot;];
+        return r == null ? new string[0] : r;
+    }" />
+
+    <!-- 2b. Tier. Precedence is explicit and descending, so someone holding two tier
+         roles deterministically lands in the higher one rather than wherever the
+         claim happened to be ordered.
+
+         Falling through to "lite" is deliberate: a token with Claude.User but no tier
+         role gets the CHEAPEST tier, not an unlimited one. Combined with "User
+         assignment required" on the app registration, there is no path to an
+         unmetered request. -->
+    <set-variable name="callerTier" value="@{
+        var r = (string[])context.Variables[&quot;callerRoles&quot;];
+        if (System.Array.IndexOf(r, &quot;Claude.Tier.Pro&quot;) >= 0) { return &quot;pro&quot;; }
+        if (System.Array.IndexOf(r, &quot;Claude.Tier.Basic&quot;) >= 0) { return &quot;basic&quot;; }
+        return &quot;lite&quot;;
+    }" />
+
+    <!-- 2c. Stamp identity onto the request so it reaches the gateway logs.
          Nothing else carries it: ApiManagementGatewayLlmLog has no caller column,
          and GatewayLogs' UserId / ApimSubscriptionId are both empty when auth is
-         Entra rather than APIM subscription keys. Without these two headers every
+         Entra rather than APIM subscription keys. Without these headers every
          row is anonymous and per-developer reporting is impossible.
 
-         Placed BEFORE llm-token-limit deliberately: a throttled request never
+         x-caller-tier is what makes the whole budget loop work downstream: the usage
+         processor reads it off the log record to know which CostQuota to compare
+         against, and the workbook groups by it.
+
+         Placed BEFORE every rejection below, deliberately: a rejected request never
          reaches the backend, and "who is hitting their limit" is exactly the
          question you want answered.
 
@@ -96,74 +163,21 @@
     <set-header name="x-caller-upn" exists-action="override">
       <value>@(((Jwt)context.Variables["jwt"]).Claims.GetValueOrDefault("preferred_username", "unknown"))</value>
     </set-header>
-
-    <!-- 3. Mint the gateway's own token and OVERWRITE the user's.
-         The user token must not reach Foundry: wrong audience, and forwarding it
-         leaks a user credential to the backend.
-
-         resource: Foundry's /anthropic surface requires scope
-         https://ai.azure.com/.default — NOT https://cognitiveservices.azure.com,
-         which is what every OpenAI-flavoured APIM sample uses. No Microsoft doc
-         shows this value inside authentication-managed-identity, but it is
-         VERIFIED correct — Foundry returned a real completion through it.
-         ignore-error="false" makes a credential failure loud
-         instead of forwarding an unauthenticated request. -->
-    <authentication-managed-identity
-        resource="https://ai.azure.com"
-        output-token-variable-name="foundry-token"
-        ignore-error="false" />
-    <set-header name="Authorization" exists-action="override">
-      <value>@("Bearer " + (string)context.Variables["foundry-token"])</value>
+    <set-header name="x-caller-tier" exists-action="override">
+      <value>@((string)context.Variables["callerTier"])</value>
     </set-header>
 
-    <!-- 4. Anthropic wire requirements. Drop any inbound x-api-key so it cannot
-         race the bearer token we just set. -->
-    <set-header name="anthropic-version" exists-action="skip">
-      <value>2023-06-01</value>
-    </set-header>
-    <set-header name="x-api-key" exists-action="delete" />
-
-    <!-- 5. Governance, keyed on the real human rather than a shared secret.
-         VERIFIED to throttle streamed traffic: tokens-per-minute returns 429 with
-         Retry-After, token-quota returns 403 naming the reset time.
-
-         Two levers, deliberately both set:
-           tokens-per-minute - burst protection for the backend
-           token-quota       - the per-developer spend budget
-
-         Counters are per gateway - they do not aggregate across regions or
-         workspaces. v2 tiers use a token bucket, so an initial burst equal to
-         tokens-per-minute is allowed, and it refills continuously (20000/min is
-         ~333 tokens/sec). Do not size a TEST limit so high that a call refills
-         before you can observe the debit; that reads as "streams aren't counted".
-
-         x-tokens-remaining on a streamed 200 is emitted BEFORE the completion is
-         charged, so it under-reports that request's own usage. Use GatewayLlmLogs
-         for accounting, not this header. -->
-    <llm-token-limit
-        counter-key="@((string)context.Variables[&quot;callerOid&quot;])"
-        tokens-per-minute="20000"
-        token-quota="2000000"
-        token-quota-period="Monthly"
-        estimate-prompt-tokens="false"
-        tokens-consumed-header-name="x-tokens-consumed"
-        remaining-tokens-header-name="x-tokens-remaining"
-        remaining-quota-tokens-header-name="x-quota-remaining" />
-
-    <!-- Caps: 5 dimensions, 100 unique values per dimension, 1000 active time
-         series per namespace. Beyond those, data is silently discarded — so a
-         per-user dimension stops reporting once you pass 100 distinct users. -->
-    <llm-emit-token-metric namespace="claude-gateway">
-      <dimension name="User ID" value="@((string)context.Variables[&quot;callerOid&quot;])" />
-      <dimension name="API ID" />
-    </llm-emit-token-metric>
-
-    <!-- 6. Serve GET /v1/models from the gateway.
+    <!-- 3. Serve GET /v1/models from the gateway.
          Claude Desktop probes this at launch to populate its model picker, and
          Foundry does not implement it — it returns 404 api_not_supported.
          Answering here means Desktop's Model discovery works and the
          model list is managed centrally, so no device needs one pushed to it.
-         This sits AFTER validation, so the list is still behind the app role. -->
+         This sits AFTER validation, so the list is still behind the app role.
+
+         MOVED AHEAD of the budget checks (it used to sit just before the backend).
+         Two reasons: a launch probe should not trigger a budget callout, and a
+         suspended developer's client should still start up cleanly and fail on the
+         actual message call with a readable error, rather than appearing broken. -->
     <choose>
       <when condition="@(context.Request.Method == &quot;GET&quot; &amp;&amp; context.Request.Url.Path.Contains(&quot;/models&quot;))">
         <return-response>
@@ -181,13 +195,239 @@
       </when>
     </choose>
 
+    <!-- 4. Manual suspension, by app role. The admin lever: add someone to the
+         Claude.Suspended group and they stop, visibly and reversibly, with the
+         change captured in the Entra audit log.
+
+         Costs nothing — the roles array is already parsed. It takes effect on the
+         caller's NEXT token, not this one, because that is when the claim changes.
+         Group membership is not a Continuous Access Evaluation trigger, so there is
+         no way to force it sooner; budget enforcement below is the fast path.
+
+         NOTE the identity headers repeated inside return-response. return-response
+         aborts the pipeline, so neither the outbound nor the on-error section runs
+         and the headers set at step 2c never reach the client or the response log.
+         Without these two lines every deliberate rejection is anonymous — which is
+         precisely the row you want attributed. -->
+    <choose>
+      <when condition="@(System.Array.IndexOf((string[])context.Variables[&quot;callerRoles&quot;], &quot;Claude.Suspended&quot;) >= 0)">
+        <return-response>
+          <set-status code="403" reason="Suspended" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-claude-denied-by" exists-action="override">
+            <value>admin</value>
+          </set-header>
+          <set-header name="x-caller-oid" exists-action="override">
+            <value>@((string)context.Variables["callerOid"])</value>
+          </set-header>
+          <set-header name="x-caller-tier" exists-action="override">
+            <value>@((string)context.Variables["callerTier"])</value>
+          </set-header>
+          <set-body>{"type":"error","error":{"type":"permission_error","message":"Your Claude access has been suspended. Contact the platform team."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 5. The dollar budget. The ONLY thing in this pipeline that leaves the
+         gateway, and it is built to be survivable.
+
+         Shape: read a cached verdict; on a miss, ask the budget API; cache for 30s.
+         At 100k developers that is roughly active_users/30 requests per second
+         against the budget API, not one per request. The 30s TTL is also the
+         staleness bound, and therefore the overspend window: tokens-per-minute x 30s
+         x the worst-case price is about $1.50 on the Pro tier.
+
+         IT FAILS OPEN, DELIBERATELY. ignore-error="true", a 2 second timeout, and
+         anything that is not an explicit 402 counts as "ok". A budget-service or
+         Redis outage must not take 100k developers offline — step 8's token quota is
+         still enforcing synchronously throughout, which is the entire reason that
+         backstop is sized the way it is.
+
+         The cache fails open too, and not by accident: when APIM cannot reach its
+         cache it does not raise, it returns null to the calling expression. The
+         ContainsKey guard below is the documented fallback that behaviour requires.
+
+         402 Payment Required rather than a JSON body: the verdict is a status code,
+         so there is no body to parse, no generic type argument to escape into an XML
+         attribute, and no ambiguity about what a malformed response means.
+
+         cache-lookup-value can only be used ONCE per policy section and is not
+         allowed inside a policy fragment. This is that one use. -->
+    <cache-lookup-value
+        key="@(&quot;bud:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+        variable-name="overBudget"
+        caching-type="prefer-external" />
+    <choose>
+      <when condition="@(!context.Variables.ContainsKey(&quot;overBudget&quot;))">
+        <send-request mode="new" response-variable-name="budResp" timeout="2" ignore-error="true">
+          <set-url>@("{{budget-api-base-url}}/v1/budget/" + (string)context.Variables["callerOid"])</set-url>
+          <set-method>GET</set-method>
+          <!-- ignore-error="true" here as well, and it is NOT redundant. send-request's
+               own ignore-error covers the HTTP call; token acquisition happens while
+               composing the request, so a bad audience or a missing app registration
+               would throw before send-request ever gets to swallow anything. Left at the
+               default this element is the one thing in the budget check that can 500 a
+               request instead of failing open — which would invert the entire design. -->
+          <authentication-managed-identity resource="{{budget-api-audience}}" ignore-error="true" />
+        </send-request>
+        <set-variable name="overBudget" value="@{
+            if (!context.Variables.ContainsKey(&quot;budResp&quot;)) { return &quot;unknown&quot;; }
+            var r = (IResponse)context.Variables[&quot;budResp&quot;];
+            if (r == null) { return &quot;unknown&quot;; }
+            return r.StatusCode == 402 ? &quot;over&quot; : &quot;ok&quot;;
+        }" />
+        <cache-store-value
+            key="@(&quot;bud:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+            value="@((string)context.Variables[&quot;overBudget&quot;])"
+            duration="30" />
+      </when>
+    </choose>
+    <choose>
+      <when condition="@((string)context.Variables[&quot;overBudget&quot;] == &quot;over&quot;)">
+        <return-response>
+          <set-status code="403" reason="Budget exceeded" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-claude-denied-by" exists-action="override">
+            <value>budget</value>
+          </set-header>
+          <set-header name="x-caller-oid" exists-action="override">
+            <value>@((string)context.Variables["callerOid"])</value>
+          </set-header>
+          <set-header name="x-caller-tier" exists-action="override">
+            <value>@((string)context.Variables["callerTier"])</value>
+          </set-header>
+          <set-body>{"type":"error","error":{"type":"permission_error","message":"Monthly Claude budget exhausted for your tier. It resets on the 1st. Contact the platform team if you need a tier change."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 6. Mint the gateway's own token and OVERWRITE the user's.
+         The user token must not reach Foundry: wrong audience, and forwarding it
+         leaks a user credential to the backend.
+
+         Deliberately AFTER the two rejections above — there is no reason to mint a
+         Foundry credential for a request that is about to be refused.
+
+         resource: Foundry's /anthropic surface requires scope
+         https://ai.azure.com/.default — NOT https://cognitiveservices.azure.com,
+         which is what every OpenAI-flavoured APIM sample uses. No Microsoft doc
+         shows this value inside authentication-managed-identity, but it is
+         VERIFIED correct — Foundry returned a real completion through it.
+         ignore-error="false" makes a credential failure loud
+         instead of forwarding an unauthenticated request. -->
+    <authentication-managed-identity
+        resource="https://ai.azure.com"
+        output-token-variable-name="foundry-token"
+        ignore-error="false" />
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + (string)context.Variables["foundry-token"])</value>
+    </set-header>
+
+    <!-- 7. Anthropic wire requirements. Drop any inbound x-api-key so it cannot
+         race the bearer token we just set. -->
+    <set-header name="anthropic-version" exists-action="skip">
+      <value>2023-06-01</value>
+    </set-header>
+    <set-header name="x-api-key" exists-action="delete" />
+
+    <!-- 8. Per-tier token governance, keyed on the real human rather than a shared
+         secret. VERIFIED to throttle streamed traffic: tokens-per-minute returns 429
+         with Retry-After, token-quota returns 403 naming the reset time.
+
+         WHY THREE BRANCHES AND NOT ONE PARAMETERISED ELEMENT: tokens-per-minute does
+         not accept policy expressions. Only counter-key, token-quota and
+         token-quota-period do. Named values are the one dynamic route left, because
+         their substitution is textual and happens before the attribute is
+         interpreted — so the numbers live in 04-apim-gateway.bicep and can be retuned
+         without touching this file.
+
+         WHY THE COUNTER-KEY IS TIER-PREFIXED: the v2 tiers use a token bucket, and
+         reusing one counter key with inconsistent tokens-per-minute values is
+         documented to behave unpredictably. Prefixing gives each tier its own bucket.
+         The cost is that moving someone between tiers mints a fresh counter and a
+         fresh monthly token allowance — their DOLLAR budget is unaffected, because
+         that lives in Redis keyed on oid alone, which is another reason dollars are
+         the real control and this is the backstop.
+
+         WHAT THIS IS FOR: it is sized at the tier budget divided by the CHEAPEST
+         model rate, so it does not bind before the dollar cap for anyone using cheap
+         models. Its real job is to be the ceiling during the window when step 5 is
+         failing open.
+
+         Counters are per gateway - they do not aggregate across regions or
+         workspaces. v2 tiers use a token bucket, so an initial burst equal to
+         tokens-per-minute is allowed, and it refills continuously. Do not size a TEST
+         limit so high that a call refills before you can observe the debit; that
+         reads as "streams aren't counted".
+
+         x-tokens-remaining on a streamed 200 is emitted BEFORE the completion is
+         charged, so it under-reports that request's own usage. Use GatewayLlmLogs
+         for accounting, not this header. -->
+    <choose>
+      <when condition="@((string)context.Variables[&quot;callerTier&quot;] == &quot;pro&quot;)">
+        <llm-token-limit
+            counter-key="@(&quot;pro:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+            tokens-per-minute="{{tier-pro-tpm}}"
+            token-quota="{{tier-pro-token-quota}}"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            tokens-consumed-header-name="x-tokens-consumed"
+            remaining-tokens-header-name="x-tokens-remaining"
+            remaining-quota-tokens-header-name="x-quota-remaining" />
+      </when>
+      <when condition="@((string)context.Variables[&quot;callerTier&quot;] == &quot;basic&quot;)">
+        <llm-token-limit
+            counter-key="@(&quot;basic:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+            tokens-per-minute="{{tier-basic-tpm}}"
+            token-quota="{{tier-basic-token-quota}}"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            tokens-consumed-header-name="x-tokens-consumed"
+            remaining-tokens-header-name="x-tokens-remaining"
+            remaining-quota-tokens-header-name="x-quota-remaining" />
+      </when>
+      <otherwise>
+        <llm-token-limit
+            counter-key="@(&quot;lite:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+            tokens-per-minute="{{tier-lite-tpm}}"
+            token-quota="{{tier-lite-token-quota}}"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            tokens-consumed-header-name="x-tokens-consumed"
+            remaining-tokens-header-name="x-tokens-remaining"
+            remaining-quota-tokens-header-name="x-quota-remaining" />
+      </otherwise>
+    </choose>
+
+    <!-- Caps: 5 dimensions, 100 unique values per dimension, 1000 active time
+         series per namespace. Beyond those, data is silently discarded — which is why
+         the per-user dimension this policy used to carry is GONE. At 100k developers
+         it exceeded the cap and threw away most of the series without saying so.
+         Tier has three values and fits comfortably.
+
+         Treat this as best-effort regardless: on the live BasicV2 test it produced no
+         custom metric namespace at all. GatewayLlmLogs is the reporting path. -->
+    <llm-emit-token-metric namespace="claude-gateway">
+      <dimension name="Tier" value="@((string)context.Variables[&quot;callerTier&quot;])" />
+      <dimension name="API ID" />
+    </llm-emit-token-metric>
+
     <set-backend-service base-url="https://{{foundry-resource-name}}.services.ai.azure.com/anthropic" />
   </inbound>
 
   <backend>
     <!-- buffer-response="false" is mandatory for SSE. Without it, streamed events
          are held rather than relayed. Note the 4-minute idle timeout enforced by
-         the load balancer inside APIM — long "thinking" turns can hit it. -->
+         the load balancer inside APIM — long "thinking" turns can hit it.
+
+         It is also the reason the accounting pipeline is fed by a diagnostic
+         destination rather than by an outbound policy: with buffering off, the
+         outbound section runs when the response STARTS, so it cannot see final token
+         counts. The diagnostic record is written after the stream ends. -->
     <forward-request timeout="600" buffer-response="false" />
   </backend>
 
@@ -202,14 +442,21 @@
     <set-header name="x-caller-oid" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
     </set-header>
+    <set-header name="x-caller-tier" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("callerTier", "unknown"))</value>
+    </set-header>
   </outbound>
 
   <on-error>
     <base />
     <!-- on-error is what actually runs when llm-token-limit rejects. Without this
-         block, throttle events are anonymous. -->
+         block, throttle events are anonymous. It does NOT run for the return-response
+         rejections at steps 4 and 5 — those set their own headers inline. -->
     <set-header name="x-caller-oid" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
+    </set-header>
+    <set-header name="x-caller-tier" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("callerTier", "unknown"))</value>
     </set-header>
   </on-error>
 </policies>

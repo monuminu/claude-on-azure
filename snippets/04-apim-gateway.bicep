@@ -24,8 +24,27 @@ param entraTenantId string = subscription().tenantId
 @description('The aud claim clients present. For an app with requestedAccessTokenVersion 2 this is the BARE application ID, not api://<guid>. Decode a real token to be sure.')
 param gatewayAudience string
 
-@description('Resource ID of the Log Analytics workspace that receives GatewayLlmLogs. This is where exact per-request token counts land, including for streamed calls, which llm-token-limit only estimates.')
+@description('Resource ID of the Log Analytics workspace that receives GatewayLlmLogs. Uncached input and output counts are exact even for streamed calls; cache tokens are absent from this table.')
 param logAnalyticsWorkspaceId string
+
+@description('Per-tier limits. tpm and tokenQuota become named values the policy reads; costQuota is NOT used by APIM at all - it is the dollar budget the usage processor enforces, and it lives here only so all three numbers for a tier are declared in one place. See TIERED-QUOTAS.md for how the token quota is sized (budget divided by the CHEAPEST model rate, so it does not bind before the dollar cap).')
+param tiersConfig array = [
+  { name: 'pro',   tpm: 40000, tokenQuota: 350000000, costQuota: 1000 }
+  { name: 'basic', tpm: 20000, tokenQuota: 175000000, costQuota: 500 }
+  { name: 'lite',  tpm: 4000,  tokenQuota: 35000000,  costQuota: 100 }
+]
+
+@description('Base URL of the budget API the policy calls on a cache miss, without a trailing slash. Leave at the placeholder to deploy before the budget platform exists: the call fails, ignore-error swallows it, and every request is treated as within budget.')
+param budgetApiBaseUrl string = 'https://budget-api.invalid'
+
+@description('Entra audience the gateway requests a managed-identity token for when calling the budget API. Typically the API app registration ID.')
+param budgetApiAudience string = 'api://budget-api-placeholder'
+
+@description('Resource ID of an Event Hub authorization rule that receives the same gateway logs as Log Analytics. This is what feeds the near-real-time cost pipeline. Empty disables the Event Hub destination, leaving Log Analytics as the only sink.')
+param eventHubAuthorizationRuleId string = ''
+
+@description('Event Hub name within that namespace.')
+param eventHubName string = 'claude-gateway-logs'
 
 resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
   name: foundryAccountName
@@ -75,6 +94,60 @@ resource foundryNameNv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' 
   properties: {
     displayName: 'foundry-resource-name'
     value: foundryAccountName
+    secret: false
+  }
+}
+
+// Per-tier limits, as named values rather than literals in the policy.
+//
+// tokens-per-minute is the reason this exists. It is the one llm-token-limit attribute
+// that does NOT accept a policy expression, so a named value is the only way to change
+// it without editing and redeploying the policy document. counter-key, token-quota and
+// token-quota-period do take expressions, but keeping all four numbers in one mechanism
+// is worth more than the consistency of using expressions where they happen to work.
+//
+// UNVERIFIED: the docs describe named value substitution as textual and applicable to
+// attribute values generally, but never say numeric attributes specifically. Deploy one
+// tier first and confirm the policy applies before trusting all six.
+resource tierTpmNv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [for tier in tiersConfig: {
+  parent: apim
+  name: 'tier-${tier.name}-tpm'
+  properties: {
+    displayName: 'tier-${tier.name}-tpm'
+    value: string(tier.tpm)
+    secret: false
+  }
+}]
+
+resource tierQuotaNv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [for tier in tiersConfig: {
+  parent: apim
+  name: 'tier-${tier.name}-token-quota'
+  properties: {
+    displayName: 'tier-${tier.name}-token-quota'
+    value: string(tier.tokenQuota)
+    secret: false
+  }
+}]
+
+// Where the policy asks "is this developer over budget?". Not a secret - it is a URL,
+// and the call is authenticated with the gateway's managed identity, not with anything
+// carried in the address.
+resource budgetApiUrlNv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'budget-api-base-url'
+  properties: {
+    displayName: 'budget-api-base-url'
+    value: budgetApiBaseUrl
+    secret: false
+  }
+}
+
+resource budgetApiAudienceNv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'budget-api-audience'
+  properties: {
+    displayName: 'budget-api-audience'
+    value: budgetApiAudience
     secret: false
   }
 }
@@ -129,13 +202,18 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
     tenantIdNv
     audienceNv
     foundryNameNv
+    tierTpmNv
+    tierQuotaNv
+    budgetApiUrlNv
+    budgetApiAudienceNv
   ]
 }
 
 // ---------------------------------------------------------------------------
 // Observability. Without this you get request counts and status codes but no
 // token accounting. llm-token-limit enforces budgets from ESTIMATED counts on
-// streamed calls; GatewayLlmLogs is the exact record, so bill from the log.
+// streamed calls; GatewayLlmLogs records exact uncached input/output, but omits
+// cache writes (and Log Analytics also omits reads). It is not a complete bill.
 // ---------------------------------------------------------------------------
 
 resource azureMonitorLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01' = {
@@ -163,6 +241,9 @@ resource azureMonitorLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01'
 //                               reaches the backend.
 //   frontend.response.headers - the fallback that covers throttled requests, populated
 //                               from the outbound and on-error sections of the policy.
+//                               x-claude-denied-by lands here too, and it is the only
+//                               way to tell the budget 403 from the admin 403 from the
+//                               token-quota 403 without parsing bodies.
 // Query identity as:
 //   coalesce(BackendRequestHeaders['x-caller-oid'], ResponseHeaders['x-caller-oid'])
 resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {
@@ -171,6 +252,8 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
   properties: {
     loggerId: azureMonitorLogger.id
     sampling: {
+      // 100%, and it has to stay there. Cost is computed per request from these rows;
+      // sampling would not make the bill smaller, only wrong.
       samplingType: 'fixed'
       percentage: 100
     }
@@ -179,12 +262,12 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
         headers: [ 'User-Agent' ]
       }
       response: {
-        headers: [ 'x-caller-oid' ]
+        headers: [ 'x-caller-oid', 'x-caller-tier', 'x-claude-denied-by' ]
       }
     }
     backend: {
       request: {
-        headers: [ 'x-caller-oid', 'x-caller-upn' ]
+        headers: [ 'x-caller-oid', 'x-caller-upn', 'x-caller-tier' ]
       }
     }
     // Bicep's type definition for DiagnosticContractProperties does not yet know
@@ -202,12 +285,27 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
 // CLI's --export-to-resource-specific. It is what routes rows into the dedicated
 // ApiManagementGatewayLlmLog table, with real column names (PromptTokens,
 // CompletionTokens, TotalTokens, IsStreamCompletion, ModelName).
+//
+// THE EVENT HUB DESTINATION IS THE COST PIPELINE'S SOURCE, and it is here rather than
+// in an outbound policy for a specific reason. forward-request runs with
+// buffer-response="false" because SSE requires it, so the outbound section executes
+// when the response STARTS — before a streamed completion has produced its token
+// counts. Both Claude clients stream every request, so an outbound "publish usage
+// event" would report on nothing. The diagnostic pipeline writes its record after the
+// response finishes, and one setting can fan out to both sinks, so Log Analytics keeps
+// feeding the workbook while Event Hub feeds the near-real-time processor.
+//
+// UNVERIFIED: prove the fan-out delivers to both destinations, and measure the actual
+// end-to-end latency, before building on it. It is the load-bearing assumption of the
+// entire budget loop.
 resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: apim
   name: 'claude-gateway-llm-logs'
   properties: {
     workspaceId: logAnalyticsWorkspaceId
     logAnalyticsDestinationType: 'Dedicated'
+    eventHubAuthorizationRuleId: empty(eventHubAuthorizationRuleId) ? null : eventHubAuthorizationRuleId
+    eventHubName: empty(eventHubAuthorizationRuleId) ? null : eventHubName
     logs: [
       {
         category: 'GatewayLlmLogs'
@@ -245,3 +343,7 @@ resource inferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 
 output gatewayBaseUrl string = '${apim.properties.gatewayUrl}/anthropic'
 output apimPrincipalId string = apim.identity.principalId
+
+// Feed these straight into 14-claude-tiers.bicep and 16-budget-platform.bicep so the
+// tier numbers are declared once and consumed everywhere.
+output tiers array = tiersConfig

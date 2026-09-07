@@ -8,9 +8,10 @@
 //   az deployment group create -g <rg> -f 10-claude-usage-summary-rule.bicep \
 //      -p workspaceName=<log analytics workspace name>
 //
-// PREREQUISITE: the gateway policy must already stamp x-caller-oid / x-caller-upn and the
-// API diagnostic must log them (03-apim-claude-policy.xml, 04-apim-gateway.bicep).
-// Without those the aggregate is real but every row says "anonymous".
+// PREREQUISITE: the gateway policy must already stamp x-caller-oid / x-caller-upn /
+// x-caller-tier and the API diagnostic must log them (03-apim-claude-policy.xml,
+// 04-apim-gateway.bicep). Without those the aggregate is real but every row says
+// "anonymous", and without the tier header every row says "unknown".
 //
 // RETENTION IS A SEPARATE STEP, and the obvious command for it fails.
 // The destination table is created by the first bin, not by this deployment, so its
@@ -53,9 +54,20 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existin
 //   2. NO TimeGenerated in the output. Reserved column names get an _Original suffix
 //      appended. The bin timestamp arrives automatically as _BinStartTime.
 //   3. NO pivot / bag_unpack / user-defined functions - unsupported in summary rules.
-//      The output must be long, not wide.
+//      The output must be long, not wide. That is also why ClaudeTiers() is NOT called
+//      here: join the tier limits on at query time, not at rollup time.
 // Also note percentile() over an int column returns an int, so coalescing it against a
 // 0.0 literal fails with SEM0525 "case: return types are not compatible". Hence todouble().
+//
+// Tier is grouped BY, and DeniedBudget / DeniedAdmin are counted separately from
+// Throttled. Those three numbers answer different questions - "this tier is under-sized",
+// "this developer has spent their money", and "an admin stopped this person" are not the
+// same operational event, and collapsing them into one Throttled column loses exactly the
+// distinction you need at 3am.
+// LLM rows without RequestId are probes, not inference. Start the final join from
+// GatewayLogs so filtering those LLM rows does not erase 401/403/429 health events.
+// LlmStreamFlagTrueRequests records only the unreliable APIM flag. The legacy
+// StreamedRequests column must not be interpreted as a count of actual SSE requests.
 
 resource summaryRule 'Microsoft.OperationalInsights/workspaces/summaryLogs@2025-07-01' = {
   parent: workspace
@@ -75,9 +87,13 @@ let gwBase = ApiManagementGatewayLogs
     | where Url has "/anthropic"
     | extend OidReq  = tostring(BackendRequestHeaders["x-caller-oid"]),
              OidResp = tostring(ResponseHeaders["x-caller-oid"]),
+             TierReq = tostring(BackendRequestHeaders["x-caller-tier"]),
+             TierResp= tostring(ResponseHeaders["x-caller-tier"]),
+             DeniedBy= tostring(ResponseHeaders["x-claude-denied-by"]),
              RawUpn  = tostring(BackendRequestHeaders["x-caller-upn"]),
              UA      = tostring(RequestHeaders["User-Agent"])
     | extend Oid = iff(isempty(OidReq), OidResp, OidReq)
+    | extend Tier = coalesce(iff(isempty(TierReq), TierResp, TierReq), "unknown")
     | extend Client = case(UA has "claude-cli", "Claude Code",
                            UA has "Electron" and UA has "Claude/", "Claude Desktop",
                            UA startswith "Bun/", "Claude Desktop",
@@ -87,19 +103,25 @@ let ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, R
 let gw = gwBase
     | join kind=leftouter ids on Oid
     | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, "anonymous")
-    | project CorrelationId, ResponseCode, BackendTime, User, Oid, Client;
-ApiManagementGatewayLlmLog
+    | project CorrelationId, ResponseCode, BackendTime, User, Oid, Tier, Client, DeniedBy;
+let llm = ApiManagementGatewayLlmLog
+    | where isnotempty(RequestId);
+gw
+| join kind=leftouter (llm) on CorrelationId
+| where isnotempty(RequestId) or ResponseCode >= 400
 | extend Model = iff(isempty(ModelName), "none", replace_regex(ModelName, @"-\d{8}$", ""))
-| join kind=inner (gw) on CorrelationId
 | summarize Requests         = count(),
+            InferenceRequests = countif(isnotempty(RequestId)),
             Prompt           = sum(PromptTokens),
             Completion       = sum(CompletionTokens),
             Tokens           = sum(TotalTokens),
             Throttled        = countif(ResponseCode in (429, 403)),
+            DeniedBudget     = countif(DeniedBy == "budget"),
+            DeniedAdmin      = countif(DeniedBy == "admin"),
             Errors           = countif(ResponseCode >= 400 and ResponseCode !in (429, 403)),
-            StreamedRequests = countif(IsStreamCompletion == 1),
+            LlmStreamFlagTrueRequests = countif(IsStreamCompletion == 1),
             BackendMsP95Raw  = percentile(BackendTime, 95)
-  by Oid, User, Client, Model
+  by Oid, User, Client, Model, Tier
 | extend BackendMsP95 = toint(coalesce(todouble(BackendMsP95Raw), 0.0))
 | project-away BackendMsP95Raw
 '''

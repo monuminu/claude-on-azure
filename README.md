@@ -20,6 +20,8 @@ endpoint), **Azure API Management as an enterprise gateway**, an **admin usage w
 - Putting **Azure API Management** in front of Foundry so admins configure once and users just sign
   in — per-user Entra auth, app-role gating, token limits, and the audience mismatch that silently
   breaks one of the two clients
+- Giving three developer tiers **their own monthly dollar budget** — and why APIM products,
+  the obvious answer, cannot be driven from a claim
 - Building an **admin usage workbook** — per-developer token and cost reporting, Claude Code vs
   Claude Desktop, and who is hitting their limits, from gateway logs that start out anonymous
 - Setting up the **Microsoft 365 connector** by hand in Entra when your Global Admin has no Claude
@@ -30,23 +32,50 @@ endpoint), **Azure API Management as an enterprise gateway**, an **admin usage w
 
 ```
 index.md            the guide
+TIERED-QUOTAS.md    per-developer dollar budgets at 100K developers — design doc
+CACHE-TOKEN-ANALYSIS.md  measured cache-accounting gaps and remediation review
 images/             screenshots (tenant identifiers replaced)
 snippets/
   01-curl-entra.sh  cURL against the Foundry Anthropic endpoint, Entra auth
   02-python-entra.py  AnthropicFoundry + DefaultAzureCredential
-  03-apim-claude-policy.xml   APIM inbound policy: Entra validation + MI backend auth
-  04-apim-gateway.bicep       APIM v2 + system identity + API + role assignment
+  03-apim-claude-policy.xml   APIM inbound policy: Entra validation, tier limits, MI backend auth
+  04-apim-gateway.bicep       APIM v2 + system identity + API + tier named values + role assignment
   05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
   06-claude-code-managed-settings.json  admin-pushed Claude Code settings
   07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
-  08-claude-usage-workbook.json  4-page admin workbook, 26 tiles
+  08-claude-usage-workbook.json  4-page admin workbook, 29 tiles
   09-workbook.bicep           deploys the workbook against your workspace
   10-claude-usage-summary-rule.bicep  hourly rollup, for history past raw retention
   11-grafana.bicep            Azure Managed Grafana + RBAC (billable, ~$31/month)
   11a-grafana-workspace-rbac.bicep    cross-resource-group role assignment module
-  12-claude-usage-grafana-dashboard.json  16-panel Grafana dashboard
+  12-claude-usage-grafana-dashboard.json  20-panel Grafana dashboard
   13-import-grafana-dashboard.sh  imports it (no ARM path for AMG dashboards)
+  14-claude-tiers.bicep       ClaudeTiers() function + PRICING_CL table and DCR
+  15-load-pricing.py          maintained Claude prices -> PRICING_CL and Redis
+  16-budget-platform.bicep    Event Hub, Redis, Cosmos, and the two functions
+  17-usage-processor/         Event Hub trigger: price, count, flag over-budget
+  18-budget-api/              the boolean the gateway policy asks
+  19-tier-smoke-test.sh       per-tier limits, rejection reasons, fail-open
 ```
+
+## Per-developer budgets
+
+[TIERED-QUOTAS.md](TIERED-QUOTAS.md) covers the follow-on problem: three developer tiers,
+a personal monthly dollar budget each, at roughly 100,000 developers. APIM has no
+cost-limit policy — `llm-token-limit` counts tokens, and only prompt and completion ones
+— so dollars need a second mechanism. Three layers: per-tier token limits in policy, a
+near-real-time budget flag backed by Redis, and an Entra app role as the manual admin
+lever.
+
+Diagram: [`images/tiered-quotas-architecture.drawio`](images/tiered-quotas-architecture.drawio).
+
+**The tier policy and budget processor have live verification recorded in the design and code,
+but cost coverage is incomplete.** The Event Hub processor includes uncached input, output and cache
+reads; cache writes are missing. The workbook also omits reads. The measured sample captured about
+38% of actual cost in the processor, so these are partial-cost limits, not complete dollar ceilings.
+[CACHE-TOKEN-ANALYSIS.md](CACHE-TOKEN-ANALYSIS.md) records the evidence, answers the remediation design
+questions, and recommends a streaming meter for accurate per-user cache-write attribution. Its local
+pricing/reporting corrections have not been deployed by this review.
 
 ## About the testing
 

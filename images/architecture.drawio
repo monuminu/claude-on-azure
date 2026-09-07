@@ -1,0 +1,163 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram name="Claude on Azure" id="claude-on-azure">
+    <mxGraphModel dx="2045" dy="1284" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=20;fontStyle=1;align=left;verticalAlign=middle;fontColor=#1F2933;" value="Claude on Azure — enterprise reference architecture" vertex="1">
+          <mxGeometry height="30" width="700" x="14" y="-30" as="geometry" />
+        </mxCell>
+        <mxCell id="cg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F7FA;strokeColor=#B0BEC5;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#37474F;dashed=0;" value="Clients" vertex="1">
+          <mxGeometry height="300" width="220" x="-13" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="cc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;fontSize=11;align=center;" value="Claude Code (CLI)&#xa;apiKeyHelper mints token&#xa;sends it in x-api-key" vertex="1">
+          <mxGeometry height="66" width="180" x="7" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="cd" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;fontSize=11;align=center;" value="Claude Desktop / Cowork&#xa;gateway OIDC flow&#xa;sends Authorization: Bearer" vertex="1">
+          <mxGeometry height="66" width="180" x="7" y="205" as="geometry" />
+        </mxCell>
+        <mxCell id="sdk" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;fontSize=11;align=center;" value="AnthropicFoundry SDK" vertex="1">
+          <mxGeometry height="60" width="180" x="7" y="285" as="geometry" />
+        </mxCell>
+        <mxCell id="eg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1976D2;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#0D47A1;" value="Microsoft Entra ID" vertex="1">
+          <mxGeometry height="220" width="200" x="300" y="158" as="geometry" />
+        </mxCell>
+        <mxCell id="eapp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1976D2;fontSize=11;" value="App registration&#xa;app role: Claude.User" vertex="1">
+          <mxGeometry height="56" width="164" x="318" y="198" as="geometry" />
+        </mxCell>
+        <mxCell id="etok" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1976D2;fontSize=11;" value="v2 access token&#xa;aud = bare app id&#xa;preferred_username, oid" vertex="1">
+          <mxGeometry height="66" width="164" x="318" y="272" as="geometry" />
+        </mxCell>
+        <mxCell id="ag" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#1B5E20;" value="Azure API Management (v2 tier — BasicV2+)&#xa;inbound policy pipeline" vertex="1">
+          <mxGeometry height="431" width="325" x="587" y="79" as="geometry" />
+        </mxCell>
+        <mxCell id="p0" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#66BB6A;fontSize=10;align=left;spacingLeft=8;" value="0 · normalise credential header&#xa;x-api-key → Authorization" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#66BB6A;fontSize=10;align=left;spacingLeft=8;" value="1 · validate-azure-ad-token&#xa;audience + roles claim gate" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#66BB6A;fontSize=10;align=left;spacingLeft=8;" value="2 · stamp identity&#xa;x-caller-oid / x-caller-upn" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#66BB6A;fontSize=10;align=left;spacingLeft=8;" value="3 · authentication-managed-identity&#xa;swaps user token for MI token" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F9A825;fontSize=10;align=left;spacingLeft=8;" value="4 · llm-token-limit (per oid)&#xa;20k TPM burst · 2M monthly quota" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#66BB6A;fontSize=10;align=left;spacingLeft=8;" value="5 · GET /v1/models answered locally&#xa;Foundry does not implement it" vertex="1">
+          <mxGeometry height="40" width="254" x="634" y="380" as="geometry" />
+        </mxCell>
+        <mxCell id="p6" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F1F8E9;strokeColor=#43A047;fontSize=10;align=left;spacingLeft=8;fontStyle=2;" value="backend · forward-request&#xa;buffer-response=false (SSE)" vertex="1">
+          <mxGeometry height="42" width="254" x="634" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="fg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#4A148C;" value="Microsoft Foundry" vertex="1">
+          <mxGeometry height="240" width="250" x="960" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="fep" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8E24AA;fontSize=11;" value="&lt;resource&gt;.services.ai.azure.com&#xa;/anthropic" vertex="1">
+          <mxGeometry height="52" width="214" x="978" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="H_IbodNg_rwzE5vmIEHq-1" edge="1" parent="1" source="fdep" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="fep" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fdep" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8E24AA;fontSize=11;" value="Deployments (Hosted on Azure)&#xa;claude-opus-5 · claude-sonnet-5&#xa;claude-opus-4-5 · claude-haiku-4-5" vertex="1">
+          <mxGeometry height="70" width="214" x="978" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="fccu" parent="1" style="text;html=1;fontSize=10;fontStyle=2;align=center;fontColor=#6A1B9A;" value="billed as CCU / PTU" vertex="1">
+          <mxGeometry height="20" width="214" x="978" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="mg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFDE7;strokeColor=#F9A825;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#F57F17;" value="Observability" vertex="1">
+          <mxGeometry height="200" width="630" x="640" y="574" as="geometry" />
+        </mxCell>
+        <mxCell id="la" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F9A825;fontSize=11;" value="Log Analytics workspace&lt;br&gt;ApiManagementGatewayLlmLog&lt;br&gt;GatewayLogs" vertex="1">
+          <mxGeometry height="90" width="210" x="660" y="634" as="geometry" />
+        </mxCell>
+        <mxCell id="wb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F9A825;fontSize=11;" value="Azure Workbook — 26 tiles&#xa;per-developer tokens + cost" vertex="1">
+          <mxGeometry height="42" width="300" x="940" y="604" as="geometry" />
+        </mxCell>
+        <mxCell id="sr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F9A825;fontSize=11;" value="Summary rule — hourly rollup&#xa;history past raw retention" vertex="1">
+          <mxGeometry height="42" width="300" x="940" y="658" as="geometry" />
+        </mxCell>
+        <mxCell id="gf" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F9A825;fontSize=11;" value="Azure Managed Grafana — 16 panels&#xa;billable, ~$31/month" vertex="1">
+          <mxGeometry height="42" width="300" x="940" y="712" as="geometry" />
+        </mxCell>
+        <mxCell id="legend" parent="1" style="text;html=1;fontSize=11;fontStyle=3;align=left;fontColor=#616161;" value="solid = request path      dashed = token / control plane      dotted = telemetry" vertex="1">
+          <mxGeometry height="20" width="620" x="40" y="790" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="cc" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#1976D2;fontSize=10;fontColor=#0D47A1;endArrow=block;strokeWidth=2;" target="eapp">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="97" y="117" />
+              <mxPoint x="400" y="117" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="cd" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#1976D2;fontSize=10;fontColor=#0D47A1;endArrow=block;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="eg" value="sign in · acquire token">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="226" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="cg" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=10;fontColor=#1B5E20;endArrow=block;" target="p0" value="request + bearer">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="150" y="59" />
+              <mxPoint x="547" y="59" />
+              <mxPoint x="547" y="150" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="p1" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#1976D2;fontSize=10;fontColor=#0D47A1;endArrow=block;" target="etok" value="validate signature, aud, roles">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="551" y="200" />
+              <mxPoint x="551" y="466" />
+              <mxPoint x="420" y="466" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="p3" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#1976D2;fontSize=10;fontColor=#0D47A1;endArrow=block;" target="eg" value="MI token for ai.azure.com">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="577" y="300" />
+              <mxPoint x="577" y="215" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="p6" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6A1B9A;strokeWidth=2;fontSize=10;fontColor=#4A148C;endArrow=block;" target="fep" value="Anthropic Messages API&#xa;system-assigned MI">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1253" y="461" />
+              <mxPoint x="1253" y="206" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="cg" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#90A4AE;strokeWidth=2;dashed=1;fontSize=10;fontColor=#546E7A;endArrow=block;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" target="fg" value="direct, keyless Entra (no gateway)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="97" y="531" />
+              <mxPoint x="1085" y="531" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="ag" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;dashPattern=1 3;strokeColor=#F9A825;strokeWidth=2;fontSize=10;fontColor=#F57F17;endArrow=block;" target="la" value="diagnostic settings">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="725" y="597" />
+              <mxPoint x="725" y="597" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="la" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;dashPattern=1 3;strokeColor=#F9A825;endArrow=block;targetPerimeterSpacing=1;endSize=7;" target="wb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="la" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;dashPattern=1 3;strokeColor=#F9A825;endArrow=block;targetPerimeterSpacing=1;endSize=7;" target="sr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="1" source="la" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;dashPattern=1 3;strokeColor=#F9A825;endArrow=block;targetPerimeterSpacing=1;endSize=7;" target="gf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

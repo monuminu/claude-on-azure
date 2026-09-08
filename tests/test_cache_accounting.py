@@ -198,7 +198,7 @@ class ReconcilerTests(unittest.TestCase):
 
     def test_row_schema_matches_the_ingestion_stream(self):
         # Must stay in step with the Custom-Json-CLAUDECOSTROLLUP_CL declaration and the
-        # ClaudeCostRollup_CL table in 14-claude-tiers.bicep. A column present here and
+        # ClaudeCostRollup_CL table in infra/14-claude-tiers.bicep. A column present here and
         # absent there is dropped at ingestion without an error.
         row, = reconciler.build_rows(self.buckets(), pricing.PRICES, "monuminu")[0]
         self.assertEqual(set(row), {

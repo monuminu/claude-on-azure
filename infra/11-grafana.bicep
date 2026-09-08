@@ -10,7 +10,7 @@
 // Treat it as unavailable unless your subscription is allowlisted. Budget for Standard.
 //
 //   az provider register --namespace Microsoft.Dashboard        # NOT registered by default
-//   az deployment group create -g <rg> -f 11-grafana.bicep \
+//   az deployment group create -g <rg> -f infra/11-grafana.bicep \
 //      -p grafanaName=<name> logAnalyticsWorkspaceId=<workspace resource id> \
 //         adminPrincipalId=$(az ad signed-in-user show --query id -o tsv)
 //

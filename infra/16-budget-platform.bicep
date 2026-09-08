@@ -23,7 +23,7 @@
 //   dependsOn on the Redis
 //   access policy assignments    - two submitted concurrently is a coin flip
 //
-//   az deployment group create -g <rg> -f 16-budget-platform.bicep \
+//   az deployment group create -g <rg> -f infra/16-budget-platform.bicep \
 //      -p namePrefix=claudebudget logAnalyticsWorkspaceId=<workspace resource id>
 //
 // Then feed the outputs back into 04-apim-gateway.bicep:

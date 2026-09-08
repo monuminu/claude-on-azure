@@ -16,7 +16,7 @@ would write from first principles. Verify against your own deployment before bui
 ## The problem
 
 The gateway policy today gives every developer the same flat allowance
-([`snippets/03-apim-claude-policy.xml`](snippets/03-apim-claude-policy.xml)):
+([`infra/03-apim-claude-policy.xml`](infra/03-apim-claude-policy.xml)):
 
 ```xml
 <llm-token-limit counter-key="@(...callerOid...)"
@@ -141,7 +141,7 @@ for admission limits and budget reservations needed to establish a defensible bo
 
 ## Layer 1 — Tiered token limits
 
-**File:** [`snippets/03-apim-claude-policy.xml`](snippets/03-apim-claude-policy.xml)
+**File:** [`infra/03-apim-claude-policy.xml`](infra/03-apim-claude-policy.xml)
 
 ### a. Four app roles
 
@@ -200,7 +200,7 @@ Beside `x-caller-oid`, in all three places identity is already stamped: request 
 98), `<outbound>` (line 202) and `<on-error>` (line 211). Without the `<on-error>` copy, throttled
 and rejected requests carry no tier — and at this size *"which tier is hitting its cap"* is the
 whole reporting question. Add `'x-caller-tier'` to both diagnostic header lists in
-[`snippets/04-apim-gateway.bicep:168-199`](snippets/04-apim-gateway.bicep).
+[`infra/04-apim-gateway.bicep:168-199`](infra/04-apim-gateway.bicep).
 
 ### d. Three token limits behind a `<choose>`
 
@@ -242,7 +242,7 @@ best-effort, not the reporting path.
 `tokens-per-minute="{{tier-pro-tpm}}"` works: named value substitution is textual and happens before
 the attribute is interpreted, and it is the only dynamic route for that attribute given expressions
 are barred. Declare them from a `tiersConfig` array in
-[`snippets/04-apim-gateway.bicep:52-80`](snippets/04-apim-gateway.bicep) beside the three existing
+[`infra/04-apim-gateway.bicep:52-80`](infra/04-apim-gateway.bicep) beside the three existing
 named values. Standard v2 allows 10,000 named values, so nine is nothing.
 
 The docs never state numeric attributes specifically, so confirm one deploys before converting all
@@ -320,7 +320,7 @@ Load-bearing details:
 
 **Source: an Event Hub diagnostic destination, not policy.** Add Event Hub alongside the existing
 Log Analytics destination on the APIM diagnostic setting in
-[`snippets/04-apim-gateway.bicep`](snippets/04-apim-gateway.bicep) — categories `GatewayLlmLogs` and
+[`infra/04-apim-gateway.bicep`](infra/04-apim-gateway.bicep) — categories `GatewayLlmLogs` and
 `GatewayLogs`, which already carry `x-caller-oid` and `x-caller-tier` via the header lists. Log
 Analytics keeps receiving everything, so the workbook, Grafana and the hourly summary rule are
 untouched.
@@ -361,16 +361,16 @@ truth for the workbook, Grafana and the summary rule. The Function reads the sam
 
 ### c. Reporting
 
-- [`snippets/10-claude-usage-summary-rule.bicep:102`](snippets/10-claude-usage-summary-rule.bicep) —
+- [`infra/10-claude-usage-summary-rule.bicep:102`](infra/10-claude-usage-summary-rule.bicep) —
   add `Tier` to the `by` clause, sourced from `BackendRequestHeaders["x-caller-tier"]` with the same
   `ResponseHeaders` fallback used for `Oid` at lines 76-80.
-- [`snippets/08-claude-usage-workbook.json`](snippets/08-claude-usage-workbook.json) — replace every
+- [`infra/08-claude-usage-workbook.json`](infra/08-claude-usage-workbook.json) — replace every
   `let rates = datatable(...)` with a join to
   `PRICING_CL | summarize arg_max(TimeGenerated, *) by Model`. Rewrite `pp-quota`: drop
   `| extend Quota = 2000000`, join `ClaudeTiers()` on `Tier`, lead with **$ spent against
   `CostQuota`** and keep tokens secondary. Add a `Tier` parameter beside `Client`, a per-tier spend
   tile, a currently-over-budget count, and a tile splitting 403s by `x-claude-denied-by`.
-- [`snippets/12-claude-usage-grafana-dashboard.json`](snippets/12-claude-usage-grafana-dashboard.json)
+- [`infra/12-claude-usage-grafana-dashboard.json`](infra/12-claude-usage-grafana-dashboard.json)
   — same pricing join, plus a `tier` template variable.
 - The `ids` join (`arg_max(TimeGenerated, RawUpn) by Oid`, repeated in ~20 tiles) scans every row to
   resolve oid → email. At this size move it onto `ClaudeUsageHourly_CL`, or drop it and resolve oids

@@ -5,7 +5,7 @@
 // of rows - one per user, per model, per client - which is roughly 0.01% of source volume
 // and cheap to keep for a year. That is what makes month-over-month reporting possible.
 //
-//   az deployment group create -g <rg> -f 10-claude-usage-summary-rule.bicep \
+//   az deployment group create -g <rg> -f infra/10-claude-usage-summary-rule.bicep \
 //      -p workspaceName=<log analytics workspace name>
 //
 // PREREQUISITE: the gateway policy must already stamp x-caller-oid / x-caller-upn /

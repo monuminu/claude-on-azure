@@ -158,7 +158,7 @@ def upload_to_redis(rows, redis_host: str, redis_port: int = 6380) -> None:
     symptom is quiet. The processor logs "no price for model X", charges zero, and every
     developer looks free.
 
-    Entra auth, not an access key: 16-budget-platform.bicep sets
+    Entra auth, not an access key: infra/16-budget-platform.bicep sets
     disableAccessKeyAuthentication, so there is no key to use even if you wanted one.
     """
     import base64
@@ -190,7 +190,7 @@ def main() -> None:
     p.add_argument("--region", default="eastus", help="armRegionName, only used by --discover")
     p.add_argument("--currency", default="USD")
     p.add_argument("--discover", action="store_true", help="re-check whether Azure publishes Claude meters")
-    p.add_argument("--dcr-endpoint", help="logsIngestion endpoint from 14-claude-tiers.bicep")
+    p.add_argument("--dcr-endpoint", help="logsIngestion endpoint from infra/14-claude-tiers.bicep")
     p.add_argument("--dcr-immutable-id")
     p.add_argument("--dcr-stream", default="Custom-Json-PRICING_CL")
     p.add_argument("--redis-host", help="e.g. mycache.redis.cache.windows.net (Entra auth, no key)")

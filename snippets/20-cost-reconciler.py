@@ -222,7 +222,7 @@ def main() -> None:
                    help="ARM id of the Foundry / Cognitive Services account serving Claude")
     p.add_argument("--hours", type=int, default=24, help="lookback window (metrics retain 93 days)")
     p.add_argument("--grain-minutes", type=int, default=60, help="bin size; 60 matches the hourly rollup")
-    p.add_argument("--dcr-endpoint", help="logsIngestion endpoint from 14-claude-tiers.bicep")
+    p.add_argument("--dcr-endpoint", help="logsIngestion endpoint from infra/14-claude-tiers.bicep")
     p.add_argument("--dcr-immutable-id")
     p.add_argument("--dcr-stream", default="Custom-Json-CLAUDECOSTROLLUP_CL")
     p.add_argument("--dry-run", action="store_true", help="print the rows instead of uploading")

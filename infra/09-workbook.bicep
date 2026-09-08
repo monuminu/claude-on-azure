@@ -4,7 +4,7 @@
 // 2026-09-02. All 22 queries in the workbook were executed against real data before
 // deployment; every tile rendered.
 //
-//   az deployment group create -g <rg> -f 09-workbook.bicep \
+//   az deployment group create -g <rg> -f infra/09-workbook.bicep \
 //      -p logAnalyticsWorkspaceId=<workspace resource id>
 //
 // PREREQUISITES — the workbook is anonymous without both of these:

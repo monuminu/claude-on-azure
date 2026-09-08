@@ -5,7 +5,7 @@
 # The instance is deployable (11-grafana.bicep); its contents are not. Import goes
 # through the Grafana API, which the `amg` Azure CLI extension wraps.
 #
-#   ./13-import-grafana-dashboard.sh <grafana-name> <resource-group> <workspace-resource-id>
+#   infra/13-import-grafana-dashboard.sh <grafana-name> <resource-group> <workspace-resource-id>
 #
 # Requires: az CLI with the amg extension (installed on first use), and Grafana Admin
 # or Editor on the instance. Azure RBAC Owner/Contributor on the resource is NOT enough

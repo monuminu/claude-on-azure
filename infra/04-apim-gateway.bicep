@@ -6,7 +6,7 @@
 // `az rest`, to an APIM that already existed. This template's own resource
 // composition has not been deployed from scratch.
 //
-//   az deployment group create -g <rg> -f 04-apim-gateway.bicep \
+//   az deployment group create -g <rg> -f infra/04-apim-gateway.bicep \
 //      -p apimName=<name> foundryAccountName=<foundry> \
 //         publisherEmail=you@contoso.com gatewayAudience=<app-id>
 //

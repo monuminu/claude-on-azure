@@ -35,14 +35,11 @@ index.md            the guide
 TIERED-QUOTAS.md    per-developer dollar budgets at 100K developers — design doc
 CACHE-TOKEN-ANALYSIS.md  measured cache-accounting gaps and remediation review
 images/             screenshots (tenant identifiers replaced)
-snippets/
-  01-curl-entra.sh  cURL against the Foundry Anthropic endpoint, Entra auth
-  02-python-entra.py  AnthropicFoundry + DefaultAzureCredential
+
+infra/              everything you deploy — start at infra/README.md
+  README.md                   prerequisites, deploy order, and the two-pass 04 -> 16 -> 04 loop
   03-apim-claude-policy.xml   APIM inbound policy: Entra validation, tier limits, MI backend auth
   04-apim-gateway.bicep       APIM v2 + system identity + API + tier named values + role assignment
-  05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
-  06-claude-code-managed-settings.json  admin-pushed Claude Code settings
-  07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
   08-claude-usage-workbook.json  4-page admin workbook, 29 tiles
   09-workbook.bicep           deploys the workbook against your workspace
   10-claude-usage-summary-rule.bicep  hourly rollup, for history past raw retention
@@ -51,12 +48,27 @@ snippets/
   12-claude-usage-grafana-dashboard.json  20-panel Grafana dashboard
   13-import-grafana-dashboard.sh  imports it (no ARM path for AMG dashboards)
   14-claude-tiers.bicep       ClaudeTiers() function + PRICING_CL table and DCR
-  15-load-pricing.py          maintained Claude prices -> PRICING_CL and Redis
   16-budget-platform.bicep    Event Hub, Redis, Cosmos, and the two functions
+  21-reconciler-metrics-rbac.bicep  Monitoring Reader for the cost reconciler
+
+snippets/           examples and the code that runs against the platform
+  01-curl-entra.sh  cURL against the Foundry Anthropic endpoint, Entra auth
+  02-python-entra.py  AnthropicFoundry + DefaultAzureCredential
+  05-gateway-smoke-test.sh    positive, negative, and streaming cases for the gateway
+  06-claude-code-managed-settings.json  admin-pushed Claude Code settings
+  07-claude-gateway-token.sh  apiKeyHelper that mints a per-user Entra token
+  15-load-pricing.py          maintained Claude prices -> PRICING_CL and Redis
   17-usage-processor/         Event Hub trigger: price, count, flag over-budget
   18-budget-api/              the boolean the gateway policy asks
   19-tier-smoke-test.sh       per-tier limits, rejection reasons, fail-open
+  20-cost-reconciler.py       Foundry metrics -> ClaudeCostRollup_CL (cache writes)
+
+tests/              regression tests for the pricing and processor arithmetic
 ```
+
+**To deploy, start at [`infra/README.md`](infra/README.md).** It carries the
+prerequisites, the deploy order, and — importantly — a per-template record of what has
+actually been deployed and verified versus what merely compiles.
 
 ## Per-developer budgets
 

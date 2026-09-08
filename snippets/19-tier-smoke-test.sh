@@ -109,7 +109,7 @@ echo "== 5. budget enforcement, end to end =="
 cat <<'STEPS'
   Not scriptable from here — it spans Redis and Entra. Run it by hand:
 
-  a. Set the Lite tier's costQuota to 0.01 and redeploy 16-budget-platform.bicep.
+  a. Set the Lite tier's costQuota to 0.01 and redeploy infra/16-budget-platform.bicep.
   b. Make one Lite call. Within a few seconds:
        redis-cli -h <host> --tls GET mtd:$(date -u +%Y%m):<oid>     -> a small number
        redis-cli -h <host> --tls EXISTS over:<oid>                  -> 1

@@ -398,53 +398,17 @@ While we're here: there is no `az apim api policy` command either. The only poli
 
 ### Provision it
 
-`sku.name` is case-sensitive with a capital `V` and no space, and `sku.capacity` is required.
+The template is [`infra/04-apim-gateway.bicep`](infra/04-apim-gateway.bicep), and [`infra/README.md`](infra/README.md) has the deploy order. What follows is what you need to know before you run it.
 
-```bicep
-resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
-  name: apimName
-  location: location
-  sku: { name: 'StandardV2', capacity: 1 }
-  identity: { type: 'SystemAssigned' }
-  properties: {
-    publisherEmail: publisherEmail
-    publisherName: publisherName
-  }
-}
+Three properties on the gateway itself are easy to get wrong. **`sku.name` is case-sensitive** with a capital `V` and no space — `StandardV2`, not `standardv2` or `Standard V2` — and **`sku.capacity` is required** alongside it. The service needs a **system-assigned identity**, because that is the credential it presents to Foundry in a moment.
 
-resource claudeApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
-  parent: apim
-  name: 'claude-anthropic'
-  properties: {
-    displayName: 'Claude (Anthropic Messages API)'
-    path: 'anthropic'
-    protocols: [ 'https' ]
-    serviceUrl: 'https://${foundryAccountName}.services.ai.azure.com/anthropic'
-    subscriptionRequired: false
-  }
-}
-```
+The API goes on at path `anthropic`, with its backend `serviceUrl` pointing at `https://<foundry-account>.services.ai.azure.com/anthropic` — the same URL the cURL in Part 1 called directly.
 
-`subscriptionRequired: false` is deliberate. Authentication here is Entra ID. Layering an APIM subscription key on top reintroduces exactly the shared secret this design exists to remove.
+And **`subscriptionRequired` is `false`**, deliberately. Authentication here is Entra ID. Layering an APIM subscription key on top reintroduces exactly the shared secret this design exists to remove.
 
-Then grant APIM's managed identity the right to run inference:
+Then grant APIM's managed identity the right to run inference: a role assignment scoped to the Foundry account, granting **Cognitive Services User** to the gateway's principal.
 
-```bicep
-// Cognitive Services User
-var cognitiveServicesUser = 'a97b65f3-24c7-4388-baec-2e87135dc908'
-
-resource inferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: foundry
-  name: guid(foundry.id, apim.id, cognitiveServicesUser)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUser)
-    principalId: apim.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-```
-
-**Microsoft's docs contradict each other on this role, so be careful.** The generic APIM AI-authentication guidance tells you to assign **Cognitive Services OpenAI User**. That guidance is written for Azure OpenAI and it is *wrong for the `/anthropic` surface*. Foundry's own keyless-auth documentation is explicit: **Cognitive Services User** is the role that grants inference, and Owner and Contributor do not. `Foundry User` is the Foundry-native equivalent. Role IDs survived the recent role renames, so use GUIDs in IaC and ignore the display names. Assignments take up to five minutes to propagate — if your first call 403s, wait before you start debugging.
+**Microsoft's docs contradict each other on this role, so be careful.** The generic APIM AI-authentication guidance tells you to assign **Cognitive Services OpenAI User**. That guidance is written for Azure OpenAI and it is *wrong for the `/anthropic` surface*. Foundry's own keyless-auth documentation is explicit: **Cognitive Services User** is the role that grants inference, and Owner and Contributor do not. `Foundry User` is the Foundry-native equivalent. Role IDs survived the recent role renames, so use GUIDs in IaC and ignore the display names — Cognitive Services User is `a97b65f3-24c7-4388-baec-2e87135dc908`. Assignments take up to five minutes to propagate — if your first call 403s, wait before you start debugging.
 
 One thing not to attempt: **managed-identity credentials on a `backends` resource in Bicep**. The portal offers it; the ARM template schema doesn't expose it, right through `2025-09-01-preview`. Do it in policy instead.
 
@@ -488,7 +452,7 @@ Four moves, in order: prove who's calling, capture their identity, swap the cred
 
 **Those `&quot;` entities are not me being fussy.** A policy expression sitting in an *attribute* cannot contain a raw double quote — it closes the attribute, and the document stops being well-formed XML. Microsoft's own policy documentation prints samples with raw quotes in exactly these positions, and they will not deploy as written. Expressions in *element* content — the `<value>` blocks — are unaffected, which is why the `set-header` above reads normally. Worth knowing before you spend twenty minutes staring at a validation error that just says the policy is malformed.
 
-That is the abridged version — the four moves that make the gateway work. The file in [`snippets/03-apim-claude-policy.xml`](snippets/03-apim-claude-policy.xml) has grown since: it also derives a tier from the `roles` claim, checks two rejection conditions, and runs one `llm-token-limit` per tier. Those additions are covered later in this part and in [TIERED-QUOTAS.md](TIERED-QUOTAS.md), and unlike everything in this section they have not been deployed.
+That is the abridged version — the four moves that make the gateway work. The file in [`infra/03-apim-claude-policy.xml`](infra/03-apim-claude-policy.xml) has grown since: it also derives a tier from the `roles` claim, checks two rejection conditions, and runs one `llm-token-limit` per tier. Those additions are covered later in this part and in [TIERED-QUOTAS.md](TIERED-QUOTAS.md), and unlike everything in this section they have not been deployed.
 
 **That audience value is not what you'd guess.** If your app registration uses `requestedAccessTokenVersion: 2`, the `aud` claim is the **bare application ID** — not the `api://<guid>` identifier URI. Only v1 tokens carry the URI form. Decode a token and check before you write the policy:
 
@@ -738,33 +702,7 @@ And prefix the counter key with the tier. The v2 tiers use a token bucket, and t
 
 **Use `GatewayLlmLogs` for the token categories it actually reports.** Matched wire/log tests found exact uncached input and output counts even on streamed calls. The `llm-token-limit` throttle uses estimates on streams and is an approximate fairness control. `IsStreamCompletion` is unreliable: a real streamed Claude Code request logged `False`. Exact reported counts do not imply complete billing — cache writes are absent, and the Log Analytics table also drops cache reads. See [the cache-token analysis](CACHE-TOKEN-ANALYSIS.md).
 
-**Turn it on properly, and it's two resources.** An APIM-level diagnostic on the API to enable LLM logging, and an Azure Monitor diagnostic setting to route the category:
-
-```bicep
-resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {
-  parent: claudeApi
-  name: 'azuremonitor'
-  properties: {
-    loggerId: azureMonitorLogger.id
-    sampling: { samplingType: 'fixed', percentage: 100 }
-    #disable-next-line BCP037
-    largeLanguageModel: { logs: 'enabled' }
-  }
-}
-
-resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
-  scope: apim
-  name: 'claude-gateway-llm-logs'
-  properties: {
-    workspaceId: logAnalyticsWorkspaceId
-    logAnalyticsDestinationType: 'Dedicated'
-    logs: [
-      { category: 'GatewayLlmLogs', enabled: true }
-      { category: 'GatewayLogs', enabled: true }
-    ]
-  }
-}
-```
+**Turn it on properly, and it's two resources.** An APIM API-level `diagnostics` resource pointed at an Azure Monitor logger, sampling at 100%, with `largeLanguageModel` set to `{ logs: 'enabled' }` — that is what enables LLM logging. And a `Microsoft.Insights/diagnosticSettings` on the APIM service that routes the `GatewayLlmLogs` and `GatewayLogs` categories to your workspace. Both are in [`infra/04-apim-gateway.bicep`](infra/04-apim-gateway.bicep).
 
 Then the query is clean, with real column names:
 
@@ -775,9 +713,9 @@ ApiManagementGatewayLlmLog
           IsStreamCompletion, ModelName
 ```
 
-**Three things in that block are mandatory:**
+**Three things there are mandatory:**
 
-- **`logAnalyticsDestinationType: 'Dedicated'`** — routes rows to `ApiManagementGatewayLlmLog` with the column names above. CLI equivalent: `--export-to-resource-specific`.
+- **`logAnalyticsDestinationType: 'Dedicated'`** on the diagnostic setting — routes rows to `ApiManagementGatewayLlmLog` with the column names above. CLI equivalent: `--export-to-resource-specific`.
 - **Keep `largeLanguageModel` despite Bicep warning `BCP037`** — the type definition lags the ARM API, which accepts the property. Suppress the warning rather than dropping the property, and confirm it survives into your compiled ARM.
 - **Only `{ logs: 'enabled' }` is accepted** — `largeLanguageModel.requests.messages` and `.responses.messages` are rejected with `Invalid field ... specified`. No loss: message-body capture buffers the response, and buffering breaks SSE.
 
@@ -831,17 +769,13 @@ So the first job is to put identity into the log. The policy already extracts th
 
 Keep `oid` as the key you group by. It's immutable; an email address is not.
 
-Then tell the diagnostic which headers to record:
+Then tell the API diagnostic which headers to record. Three scopes, and the split between them matters:
 
-```bicep
-frontend: {
-  request:  { headers: [ 'User-Agent' ] }
-  response: { headers: [ 'x-caller-oid' ] }
-}
-backend: {
-  request: { headers: [ 'x-caller-oid', 'x-caller-upn' ] }
-}
-```
+| Diagnostic scope | Headers logged |
+|---|---|
+| `frontend.request` | `User-Agent` |
+| `frontend.response` | `x-caller-oid` |
+| `backend.request` | `x-caller-oid`, `x-caller-upn` |
 
 ### Why identity is emitted twice
 
@@ -906,10 +840,10 @@ There's a second signal if you want corroboration. The `azp` claim names the app
 
 ### The workbook
 
-[`snippets/08-claude-usage-workbook.json`](https://github.com/monuminu/claude-on-azure/blob/main/snippets/08-claude-usage-workbook.json) is a four-page Azure Monitor workbook, deployed by [`09-workbook.bicep`](https://github.com/monuminu/claude-on-azure/blob/main/snippets/09-workbook.bicep):
+[`infra/08-claude-usage-workbook.json`](https://github.com/monuminu/claude-on-azure/blob/main/infra/08-claude-usage-workbook.json) is a four-page Azure Monitor workbook, deployed by [`09-workbook.bicep`](https://github.com/monuminu/claude-on-azure/blob/main/infra/09-workbook.bicep):
 
 ```bash
-az deployment group create -g <rg> -f 09-workbook.bicep \
+az deployment group create -g <rg> -f infra/09-workbook.bicep \
    -p logAnalyticsWorkspaceId=<workspace resource id>
 ```
 

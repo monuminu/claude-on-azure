@@ -7,7 +7,7 @@
 // One fix was needed: a Direct-kind DCR is capped at 30 characters, which ordinary DCRs
 // are not. See the comment on the resource below.
 //
-//   az deployment group create -g <rg> -f 14-claude-tiers.bicep \
+//   az deployment group create -g <rg> -f infra/14-claude-tiers.bicep \
 //      -p workspaceName=<log analytics workspace>
 //
 // Two things live here, and they are the single source of truth for everything

@@ -1,0 +1,92 @@
+<mxfile host="app.diagrams.net" agent="documentation-agent" version="24.0.0">
+  <diagram name="Component Relationships" id="component-relationships">
+    <mxGraphModel dx="1600" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="950" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Gateway group -->
+        <mxCell id="lane-gw" value="Gateway (infra/03, infra/04)" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="280" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="c-apim" value="APIM v2 API&#10;(04-apim-gateway.bicep)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-gw">
+          <mxGeometry x="20" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-policy" value="Inbound policy&#10;(03-apim-claude-policy.xml)&#10;validate-jwt, tier, budget, MI auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-gw">
+          <mxGeometry x="20" y="130" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="c-namedvalues" value="Named values&#10;tier-*-tpm / tier-*-tokenQuota" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-gw">
+          <mxGeometry x="20" y="220" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-mi" value="System-assigned managed identity&#10;Cognitive Services User role" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-gw">
+          <mxGeometry x="20" y="300" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Budget platform group -->
+        <mxCell id="lane-budget" value="Budget platform (infra/16, snippets/17-18)" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="300" height="450" as="geometry" />
+        </mxCell>
+        <mxCell id="c-eventhub" value="Event Hub&#10;(gateway diagnostics)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-budget">
+          <mxGeometry x="20" y="50" width="260" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="c-processor" value="usage-processor Function App&#10;(17-usage-processor/function_app.py)&#10;price, streaming-join, INCRBYFLOAT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-budget">
+          <mxGeometry x="20" y="120" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="c-budgetapi" value="budget-api Function App&#10;(18-budget-api/function_app.py)&#10;GET /v1/budget/{oid} -&gt; 200/402" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-budget">
+          <mxGeometry x="20" y="205" width="260" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="c-redis" value="Azure Cache for Redis&#10;month-to-date $ counters" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-budget">
+          <mxGeometry x="20" y="285" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="c-cosmos" value="Cosmos DB&#10;per-request ledger" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-budget">
+          <mxGeometry x="20" y="370" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Reference data group -->
+        <mxCell id="lane-ref" value="Reference data (infra/14)" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="280" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="c-tiers-fn" value="ClaudeTiers() KQL function&#10;(14-claude-tiers.bicep)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-ref">
+          <mxGeometry x="20" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-pricing" value="PRICING_CL table&#10;loaded by 15-load-pricing.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-ref">
+          <mxGeometry x="20" y="130" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-reconciler" value="cost-reconciler.py&#10;(20-cost-reconciler.py)&#10;Foundry metrics -&gt; ClaudeCostRollup_CL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-ref">
+          <mxGeometry x="20" y="210" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Reporting group -->
+        <mxCell id="lane-report" value="Reporting (infra/09-13)" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="40" width="300" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="c-workbook" value="Admin usage workbook&#10;(08/09) — 4 pages, 29 tiles" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-report">
+          <mxGeometry x="20" y="50" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-summaryrule" value="Hourly summary rule&#10;(10-claude-usage-summary-rule.bicep)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-report">
+          <mxGeometry x="20" y="130" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c-grafana" value="Azure Managed Grafana&#10;(11/12/13) — 20-panel dashboard" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-report">
+          <mxGeometry x="20" y="210" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Cross-group edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;" edge="1" parent="1" source="c-apim" target="c-policy"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;" edge="1" parent="1" source="c-policy" target="c-namedvalues"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;" edge="1" parent="1" source="c-policy" target="c-mi"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" value="diagnostics" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;" edge="1" parent="1" source="c-apim" target="c-eventhub"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;" edge="1" parent="1" source="c-eventhub" target="c-processor"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;" edge="1" parent="1" source="c-processor" target="c-redis"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;" edge="1" parent="1" source="c-processor" target="c-cosmos"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" value="reads MTD $" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;" edge="1" parent="1" source="c-budgetapi" target="c-redis"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" value="budget lookup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=2;html=1;dashed=1;" edge="1" parent="1" source="c-policy" target="c-budgetapi"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="c-processor" target="c-pricing"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="c-workbook" target="c-tiers-fn"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="c-workbook" target="c-pricing"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;" edge="1" parent="1" source="c-workbook" target="c-summaryrule"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;" edge="1" parent="1" source="c-summaryrule" target="c-grafana"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e15" value="cache-write metrics" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;dashed=1;" edge="1" parent="1" source="c-reconciler" target="c-tiers-fn"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

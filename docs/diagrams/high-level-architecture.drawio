@@ -1,0 +1,107 @@
+<mxfile host="app.diagrams.net" agent="documentation-agent" version="24.0.0">
+  <diagram name="High-Level Architecture" id="high-level-architecture">
+    <mxGraphModel dx="1600" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Clients swimlane -->
+        <mxCell id="lane-clients" value="Clients" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="220" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="client-code" value="Claude Code" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-clients">
+          <mxGeometry x="20" y="50" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="client-desktop" value="Claude Desktop / Cowork" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-clients">
+          <mxGeometry x="20" y="130" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="client-m365" value="Microsoft 365 Copilot connector" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-clients">
+          <mxGeometry x="20" y="210" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="client-curl" value="cURL / Python (AnthropicFoundry SDK)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane-clients">
+          <mxGeometry x="20" y="290" width="180" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Entra ID -->
+        <mxCell id="entra" value="Microsoft Entra ID&#10;(app registration, Claude.User /&#10;Claude.Tier.* / Claude.Suspended roles)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="320" y="40" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- This project: gateway -->
+        <mxCell id="lane-project" value="Claude on Azure gateway (this project)" style="swimlane;html=1;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="320" y="180" width="360" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="apim" value="Azure API Management (v2)&#10;Entra validation, tier limits,&#10;budget check, MI backend auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=12;shadow=1;" vertex="1" parent="lane-project">
+          <mxGeometry x="30" y="50" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="budget-platform" value="Budget platform&#10;Event Hub -&gt; usage processor -&gt; Redis (MTD $)&#10;+ Cosmos ledger, budget API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=12;shadow=1;" vertex="1" parent="lane-project">
+          <mxGeometry x="30" y="150" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="workbook" value="Admin usage workbook / Grafana&#10;(Log Analytics -&gt; workbook / dashboard)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=12;shadow=1;" vertex="1" parent="lane-project">
+          <mxGeometry x="30" y="260" width="300" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Foundry -->
+        <mxCell id="foundry" value="Microsoft Foundry&#10;Claude model deployment&#10;(Hosted on Azure)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;arcSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="220" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Anthropic (direct API alt) -->
+        <mxCell id="anthropic-direct" value="Anthropic API (direct)&#10;Hosted on Anthropic — bypasses&#10;the gateway and Foundry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Log Analytics -->
+        <mxCell id="log-analytics" value="Log Analytics workspace&#10;GatewayLlmLogs / GatewayLogs /&#10;PRICING_CL / ClaudeCostRollup_CL" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;boundedLbl=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="600" width="240" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Redis/Cosmos store -->
+        <mxCell id="store" value="Redis (MTD $ counters)&#10;+ Cosmos DB (ledger)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="620" y="600" width="220" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.2;entryDx=0;entryDy=0;" edge="1" parent="1" source="client-code" target="entra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="client-desktop" target="entra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="per-user Entra sign-in" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="entra" target="apim">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="HTTPS / Anthropic Messages API" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="apim" target="foundry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="managed identity (Cognitive Services User)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=2;html=1;dashed=1;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="apim" target="foundry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="diagnostics" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="apim" target="log-analytics">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="Event Hub" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;" edge="1" parent="1" source="apim" target="budget-platform">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="budget lookup (fail-open)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;html=1;dashed=1;exitX=0;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;" edge="1" parent="1" source="budget-platform" target="apim">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="budget-platform" target="store">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;html=1;" edge="1" parent="1" source="log-analytics" target="workbook">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="Cognitive Services User (or bypasses gateway entirely)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;dashed=1;exitX=1;exitY=0.2;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" edge="1" parent="1" source="client-desktop" target="anthropic-direct">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;" edge="1" parent="1" source="client-m365" target="entra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;strokeWidth=2;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.3;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="client-curl" target="entra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -8,8 +8,8 @@
 # token's aud is the BARE application ID, not api://<guid>. Pass whichever your app
 # actually issues - decode a token and look.
 #
-#   GATEWAY=https://<apim>.azure-api.net/anthropic \
-#   API_APP_ID=api://<application-id-uri> \
+GATEWAY=https://claude-apim-gateway-sombaner.azure-api.net/anthropic \
+API_APP_ID=api://a8305a44-b0c4-460c-991a-baf8a11cc9f3 \
 #   ./05-gateway-smoke-test.sh
 
 set -uo pipefail   # deliberately not -e: the negative cases are expected to fail

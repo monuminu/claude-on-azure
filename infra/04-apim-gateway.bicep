@@ -7,14 +7,15 @@
 // composition has not been deployed from scratch.
 //
 //   az deployment group create -g <rg> -f infra/04-apim-gateway.bicep \
-//      -p apimName=<name> foundryAccountName=<foundry> \
+//      -p apimName=<name> apimLocation=<region> foundryAccountName=<foundry> \
 //         publisherEmail=you@contoso.com gatewayAudience=<app-id>
 //
 // A v2 tier is REQUIRED: the llm-* policies only understand the Anthropic Messages
 // schema on BasicV2 / StandardV2 / PremiumV2. Note that `az apim create --sku-name`
 // does not accept the v2 SKUs at all, which is why this is Bicep and not CLI.
 
-param location string = resourceGroup().location
+@description('Azure region for the API Management gateway. Must match the Event Hub namespace region when Event Hub diagnostics are enabled.')
+param apimLocation string = resourceGroup().location
 param apimName string
 param foundryAccountName string
 param publisherEmail string
@@ -52,7 +53,7 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
   name: apimName
-  location: location
+  location: apimLocation
   // Capital V, no space. Enum: Basic|BasicV2|Consumption|Developer|Premium|PremiumV2|Standard|StandardV2
   sku: {
     name: 'StandardV2'

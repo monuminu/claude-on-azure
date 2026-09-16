@@ -8,3 +8,6 @@ __pycache__/
 # draw.io desktop writes these while a diagram is open
 .$*.bkp
 .$*.dtmp
+
+admin/setup.local.json
+claude-client-configuration.json

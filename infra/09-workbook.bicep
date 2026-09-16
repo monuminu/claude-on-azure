@@ -15,7 +15,8 @@
 @description('Resource ID of the Log Analytics workspace receiving GatewayLlmLogs and GatewayLogs.')
 param logAnalyticsWorkspaceId string
 
-param location string = resourceGroup().location
+@description('Azure region for the workbook resource. This can be different from APIM; usually set it to the Log Analytics workspace region.')
+param workbookLocation string = resourceGroup().location
 
 @description('Display name shown in the Azure Monitor workbook gallery.')
 param workbookDisplayName string = 'Claude usage — gateway view'
@@ -33,7 +34,7 @@ var workbookJson = replace(
 // deterministic, so redeploying updates the same workbook instead of creating another.
 resource claudeUsageWorkbook 'Microsoft.Insights/workbooks@2023-06-01' = {
   name: guid(resourceGroup().id, logAnalyticsWorkspaceId, 'claude-usage-workbook')
-  location: location
+  location: workbookLocation
   kind: 'shared'
   properties: {
     displayName: workbookDisplayName

@@ -1,0 +1,270 @@
+{
+  "version": "Notebook/1.0",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "isLocked": false,
+  "fallbackResourceIds": [
+    "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/PLACEHOLDER/providers/Microsoft.OperationalInsights/workspaces/PLACEHOLDER"
+  ],
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Claude team governance\n\nTeam-level usage, developer spend, model cost, and governance health for traffic routed through the Claude gateway. Team attribution comes from `x-caller-team-id`; developer attribution comes from `x-caller-oid` / `x-caller-upn`.\n\n**Cost coverage:** estimated costs use `PRICING_CL` with APIM prompt and completion tokens. They exclude cache reads and writes, so they can be lower than the budget-enforcement counter. Requests made before team headers were deployed remain visible as unattributed but cannot be assigned retroactively."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "1a1f6f2e-1111-4a1a-9a11-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "label": "Log Analytics workspace",
+            "type": 5,
+            "isRequired": true,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "typeSettings": {
+              "resourceTypeFilter": {
+                "microsoft.operationalinsights/workspaces": true
+              },
+              "additionalResourceOptions": [],
+              "showDefault": false
+            }
+          },
+          {
+            "id": "1a1f6f2e-1111-4a1a-9a11-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 }
+              ],
+              "allowCustom": true
+            },
+            "value": { "durationMs": 604800000 }
+          },
+          {
+            "id": "1a1f6f2e-1111-4a1a-9a11-000000000003",
+            "version": "KqlParameterItem/1.0",
+            "name": "Team",
+            "label": "Team",
+            "type": 2,
+            "isRequired": true,
+            "typeSettings": {
+              "additionalResourceOptions": [],
+              "showDefault": false
+            },
+            "query": "union (print value=\"*\", label=\"All teams\"), (ClaudeTeams() | project value=TeamId, label=TeamDisplayName)\n| order by label asc",
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "crossComponentResources": [ "{Workspace}" ],
+            "value": "*"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let rates = PRICING_CL\n| summarize arg_max(TimeGenerated, *) by Model\n| project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs\n| where TimeGenerated >= startofmonth(now())\n| where Url has \"/anthropic\"\n| extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog\n| where TimeGenerated >= startofmonth(now()) and isnotempty(RequestId)\n| extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet spend = gw\n| join kind=inner llm on CorrelationId\n| lookup kind=leftouter rates on Model\n| extend EstimatedCostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0\n| where isnotempty(TeamId) and TeamState == \"ok\"\n| summarize MtdEstimatedCostUsd=round(sum(EstimatedCostUsd), 2) by TeamId;\nClaudeTeams()\n| where TeamId == \"{Team}\" or \"{Team}\" == \"*\"\n| join kind=leftouter spend on TeamId\n| extend MtdEstimatedCostUsd=coalesce(MtdEstimatedCostUsd, 0.0), UtilizationPct=round(100.0 * coalesce(MtdEstimatedCostUsd, 0.0) / CostQuota, 1)\n| project TeamId, TeamDisplayName, Profile, DefaultUserTier, CostQuotaUsd=CostQuota, MtdEstimatedCostUsd, UtilizationPct\n| order by UtilizationPct desc",
+        "size": 0,
+        "title": "Team monthly-to-date estimated spend vs. cost quota",
+        "description": "Estimated APIM inference cost excludes cache reads and writes; enforcement counters can be higher.",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "UtilizationPct",
+              "formatter": 8,
+              "formatOptions": { "min": 0, "max": 100 }
+            }
+          ]
+        }
+      },
+      "name": "team-spend"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Developer cost within each team\n\nPrimary chargeback view. Select one team above to isolate its members, or leave **All teams** selected for comparison."
+      },
+      "name": "developer-cost-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let rates = PRICING_CL\n| summarize arg_max(TimeGenerated, *) by Model\n| project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend Oid=tostring(coalesce(BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"])), RawUpn=tostring(coalesce(BackendRequestHeaders[\"x-caller-upn\"], ResponseHeaders[\"x-caller-upn\"])), TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn=RawUpn;\nlet gw = gwBase\n| join kind=leftouter ids on Oid\n| extend Developer=case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n| project CorrelationId, TimeGenerated, TeamId, TeamState, Developer, Oid;\nlet llm = ApiManagementGatewayLlmLog\n| where TimeGenerated {TimeRange} and isnotempty(RequestId)\n| extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw\n| join kind=inner llm on CorrelationId\n| lookup kind=leftouter rates on Model\n| extend EstimatedCostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0\n| where isnotempty(TeamId) and TeamState == \"ok\"\n| where TeamId == \"{Team}\" or \"{Team}\" == \"*\"\n| lookup kind=leftouter (ClaudeTeams() | project TeamId, TeamDisplayName) on TeamId\n| summarize Requests=count(), PromptTokens=sum(PromptTokens), CompletionTokens=sum(CompletionTokens), TotalTokens=sum(TotalTokens), EstimatedCostUsd=round(sum(EstimatedCostUsd), 2), Models=make_set(Model, 10), LastSeen=max(TimeGenerated) by TeamId, TeamDisplayName, Developer, Oid\n| extend Models=strcat_array(array_sort_asc(Models), \", \")\n| order by EstimatedCostUsd desc",
+        "size": 0,
+        "title": "Estimated cost per developer, segregated by team",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "TotalTokens", "formatter": 8, "formatOptions": { "palette": "blue" } },
+            { "columnMatch": "EstimatedCostUsd", "formatter": 8, "formatOptions": { "palette": "green" } },
+            { "columnMatch": "LastSeen", "formatter": 6 }
+          ],
+          "filter": true
+        }
+      },
+      "name": "developer-cost-by-team"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Model usage and cost by team\n\nModels are normalized by removing dated deployment suffixes. Rates come from the latest `PRICING_CL` record per model."
+      },
+      "name": "model-cost-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let rates = PRICING_CL\n| summarize arg_max(TimeGenerated, *) by Model\n| project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog\n| where TimeGenerated {TimeRange} and isnotempty(RequestId)\n| extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw\n| join kind=inner llm on CorrelationId\n| lookup kind=leftouter rates on Model\n| extend EstimatedCostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0\n| where isnotempty(TeamId) and TeamState == \"ok\"\n| where TeamId == \"{Team}\" or \"{Team}\" == \"*\"\n| lookup kind=leftouter (ClaudeTeams() | project TeamId, TeamDisplayName) on TeamId\n| summarize Requests=count(), PromptTokens=sum(PromptTokens), CompletionTokens=sum(CompletionTokens), TotalTokens=sum(TotalTokens), EstimatedCostUsd=round(sum(EstimatedCostUsd), 2) by TeamId, TeamDisplayName, Model\n| order by EstimatedCostUsd desc",
+        "size": 0,
+        "title": "Model usage and estimated cost per team",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "PromptTokens", "formatter": 8, "formatOptions": { "palette": "blue" } },
+            { "columnMatch": "CompletionTokens", "formatter": 8, "formatOptions": { "palette": "purple" } },
+            { "columnMatch": "EstimatedCostUsd", "formatter": 8, "formatOptions": { "palette": "green" } }
+          ],
+          "filter": true
+        }
+      },
+      "name": "model-usage-cost-by-team"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Health and governance\n\nCheck attribution coverage first: costs cannot be assigned when team identity is absent or ambiguous."
+      },
+      "name": "health-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]))\n| extend Attribution=case(TeamState == \"ok\" and isnotempty(TeamId), \"Attributed\", isnotempty(TeamState), TeamState, \"No team telemetry\")\n| summarize Requests=count(), LastSeen=max(TimeGenerated) by Attribution\n| order by Requests desc",
+        "size": 0,
+        "title": "Team attribution coverage",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "piechart"
+      },
+      "name": "team-attribution-coverage"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated {TimeRange}\n| where Message startswith \"TEAM_GOVERNANCE_EVENT\"\n| extend Evt = parse_json(substring(Message, strlen(\"TEAM_GOVERNANCE_EVENT \")))\n| where tostring(Evt.type) == \"ambiguous_identity\"\n| extend Oid = tostring(Evt.oid), State = tostring(Evt.state), TeamRoleCount = toint(Evt.teamRoleCount), ProfileRoleCount = toint(Evt.profileRoleCount)\n| summarize Occurrences = count(), LastSeen = max(TimeGenerated) by Oid, State, TeamRoleCount, ProfileRoleCount\n| order by Occurrences desc",
+        "size": 0,
+        "title": "Ambiguous or missing team identity (reconcile before promoting to enforce)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table"
+      },
+      "name": "ambiguous-identity"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), DeniedBy=tostring(ResponseHeaders[\"x-claude-denied-by\"])\n| where isnotempty(DeniedBy)\n| where TeamId == \"{Team}\" or \"{Team}\" == \"*\" or isempty(TeamId)\n| lookup kind=leftouter (ClaudeTeams() | project TeamId, TeamDisplayName) on TeamId\n| extend Team=case(isnotempty(TeamDisplayName), TeamDisplayName, isnotempty(TeamId), TeamId, \"Unattributed\")\n| summarize Denials=count() by Team, DeniedBy, bin(TimeGenerated, 1h)\n| render columnchart",
+        "size": 0,
+        "title": "Denials by scope (user-budget / team-budget / identity / admin)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "categoricalbar"
+      },
+      "name": "denials-by-scope"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend TeamId = tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])),\n         Oid = tostring(coalesce(BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"])),\n         Upn = tostring(coalesce(BackendRequestHeaders[\"x-caller-upn\"], ResponseHeaders[\"x-caller-upn\"])),\n         State = tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]))\n| where isnotempty(TeamId) and TeamId != \"none\"\n| summarize Requests = count(), Users = dcount(Oid) by TeamId, State\n| join kind=leftouter (ClaudeTeams() | project TeamId, TeamDisplayName) on TeamId\n| project TeamId, TeamDisplayName, State, Requests, Users\n| order by Requests desc",
+        "size": 0,
+        "title": "Requests and distinct users per team (drill-down source)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table"
+      },
+      "name": "team-requests"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs\n| where TimeGenerated {TimeRange}\n| where Url has \"/anthropic\"\n| extend TeamId = tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])),\n         Oid = tostring(coalesce(BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"])),\n         Upn = tostring(coalesce(BackendRequestHeaders[\"x-caller-upn\"], ResponseHeaders[\"x-caller-upn\"]))\n| where TeamId == \"{Team}\" or \"{Team}\" == \"*\"\n| lookup kind=leftouter (ClaudeTeams() | project TeamId, TeamDisplayName) on TeamId\n| summarize Requests = count(), LastSeen = max(TimeGenerated) by TeamId, TeamDisplayName, Oid, Upn\n| order by Requests desc",
+        "size": 0,
+        "title": "Members of selected team",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "table"
+      },
+      "name": "team-members-drilldown"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated {TimeRange}\n| where Message startswith \"TEAM_GOVERNANCE_EVENT\"\n| extend Evt = parse_json(substring(Message, strlen(\"TEAM_GOVERNANCE_EVENT \")))\n| where tostring(Evt.type) == \"processor_lag\"\n| extend LagSeconds = todouble(Evt.lagSeconds)\n| summarize AvgLagSeconds = avg(LagSeconds), MaxLagSeconds = max(LagSeconds) by bin(TimeGenerated, 15m)\n| render timechart",
+        "size": 0,
+        "title": "Usage processor lag (Event Hub enqueue -> processed)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "timechart"
+      },
+      "name": "processor-lag"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClaudeTeams()\n| project TeamDisplayName, Profile\n| summarize Teams = count() by Profile\n| render piechart",
+        "size": 0,
+        "title": "Team distribution by profile",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "{Workspace}" ],
+        "visualization": "piechart"
+      },
+      "name": "profile-distribution"
+    }
+  ],
+  "styleSettings": {},
+  "$schemaUri": null
+}

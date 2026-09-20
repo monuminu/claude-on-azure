@@ -135,7 +135,7 @@ function adminConfig(directory) {
   const config = JSON.parse(readFileSync(join(root, 'admin/setup.example.json')));
   Object.assign(config, {
     subscriptionId: tenant, tenantId: tenant, resourceGroup: 'test-rg', apimName: 'test-apim',
-    foundryAccountName: 'test-foundry', publisherEmail: 'admin@example.test', publisherName: 'true', apimLocation: 'centralus',
+    foundryResourceGroup: 'test-foundry-rg', foundryAccountName: 'test-foundry', publisherEmail: 'admin@example.test', publisherName: 'true', apimLocation: 'centralus',
     budgetLocation: 'centralus', cosmosLocation: 'centralus', workspaceLocation: 'eastus', workbookLocation: 'eastus',
     workspaceResourceId: `/subscriptions/${tenant}/resourceGroups/log-rg/providers/Microsoft.OperationalInsights/workspaces/test-logs`,
     namePrefix: 'testbudget', gatewayAudience: audience, budgetApiAudience: '33333333-3333-4333-8333-333333333333',
@@ -183,6 +183,8 @@ if (tool === 'mock-python') {
   emit('fixture-token-never-real');
 } else if (command.startsWith('account show')) {
   emit(args.includes('--query') ? config.tenantId : {tenantId: config.tenantId});
+} else if (command.startsWith('account set')) {
+  // Main setup selects the subscription once; tenant-scoped az ad calls inherit it.
 } else if (command.startsWith('cognitiveservices account deployment list')) {
   emit(models);
 } else if (command.startsWith('resource show')) {
@@ -190,10 +192,13 @@ if (tool === 'mock-python') {
 } else if (command.startsWith('ad app show')) {
   emit(args.includes('--query') ? [config.tokenResource] : {id: 'gateway-object-id', api: {requestedAccessTokenVersion: 2, oauth2PermissionScopes: [{id: '${gatewayScope}', value: 'access_as_user', isEnabled: true}]}, identifierUris: [config.tokenResource], appRoles: [{value: 'Claude.User', isEnabled: true}]});
 } else if (command.startsWith('ad app list')) {
-  emit(fs.existsSync(process.env.MOCK_DESKTOP_APP) ? [JSON.parse(fs.readFileSync(process.env.MOCK_DESKTOP_APP))] : []);
+  emit(option('--display-name').startsWith('Claude Gateway') ? [] : fs.existsSync(process.env.MOCK_DESKTOP_APP) ? [JSON.parse(fs.readFileSync(process.env.MOCK_DESKTOP_APP))] : []);
 } else if (command.startsWith('ad app create')) {
-  const app = {appId: '${desktopClient}', id: 'desktop-object-id', displayName: option('--display-name'), signInAudience: 'AzureADMyOrg', isFallbackPublicClient: true, publicClient: {redirectUris: ['http://127.0.0.1/callback', 'http://localhost']}};
-  fs.writeFileSync(process.env.MOCK_DESKTOP_APP, JSON.stringify(app));
+  const gateway = option('--display-name').startsWith('Claude Gateway');
+  const app = gateway
+    ? {appId: config.gatewayAudience, id: 'gateway-object-id', displayName: option('--display-name'), signInAudience: 'AzureADMyOrg'}
+    : {appId: '${desktopClient}', id: 'desktop-object-id', displayName: option('--display-name'), signInAudience: 'AzureADMyOrg', isFallbackPublicClient: true, publicClient: {redirectUris: ['http://127.0.0.1/callback', 'http://localhost']}};
+  if (!gateway) fs.writeFileSync(process.env.MOCK_DESKTOP_APP, JSON.stringify(app));
   emit(app);
 } else if (command.startsWith('ad app permission add')) {
   // Permission addition is idempotent in the setup workflow.
@@ -217,7 +222,8 @@ if (tool === 'mock-python') {
   const name = option('--name');
   let values = {};
   if (name === '14-claude-tiers') values = {pricingDcrEndpoint: 'https://ingestion.test', pricingDcrImmutableId: 'dcr-id'};
-  if (name === '16-budget-platform') values = {redisHost: 'test-redis.redis.cache.windows.net', processorPrincipalId: 'processor-oid', budgetApiPrincipalId: 'budget-oid', eventHubAuthorizationRuleId: '/rule/id', eventHubName: 'claude-gateway-logs', budgetApiBaseUrl: 'https://budget.test'};
+  if (name === '16-budget-platform') values = {redisHost: 'test-redis.redis.cache.windows.net', cosmosEndpoint: 'https://test-cosmos.documents.azure.com:443/', cosmosAccountName: 'test-cosmos', cosmosDatabaseName: 'claude', cosmosContainerName: 'usage', processorPrincipalId: 'processor-oid', budgetApiPrincipalId: 'budget-oid', eventHubAuthorizationRuleId: '/rule/id', eventHubName: 'claude-gateway-logs', budgetApiBaseUrl: 'https://budget.test'};
+  if (name === '22-team-governance') values = {teamGovernanceModeNamedValue: 'team-governance-mode', teamsJsonNamedValue: 'team-governance-teams-json', profilesJsonNamedValue: 'team-governance-profiles-json', workbookId: '/workbooks/team-governance', claudeTeamsFunctionName: 'ClaudeTeams', alertsCreated: false};
   if (name === '04-apim-gateway') {
     values = {gatewayBaseUrl: 'https://test-apim.azure-api.net/anthropic', tiers: config.tiersConfig};
     fs.writeFileSync(process.env.MOCK_DEPLOYMENT, JSON.stringify({properties: {provisioningState: 'Succeeded', parameters: call.parameters, outputs: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {value}]))}}));
@@ -242,6 +248,69 @@ if (tool === 'mock-python') {
     if (name.startsWith('ANTHROPIC_') || name.startsWith('CLAUDE_CODE_USE_')) delete env[name];
   }
   return {env, configPath, log};
+}
+
+function governanceMockEnvironment(directory, config) {
+  const bin = join(directory, 'bin');
+  mkdirSync(bin);
+  const statePath = join(directory, 'governance-state.json');
+  const log = join(directory, 'governance-commands.jsonl');
+  const users = Object.fromEntries(config.teamGovernance.teams.flatMap(team => team.members).map((upn, index) => [upn, `user-${index + 1}`]));
+  writeFileSync(statePath, JSON.stringify({
+    roles: [{id: 'access-role', value: 'Claude.User', displayName: 'Claude User', description: 'existing', isEnabled: true, allowedMemberTypes: ['User']},
+      {id: 'unrelated-role', value: 'Other.Product', displayName: 'Other', description: 'preserve', isEnabled: true, allowedMemberTypes: ['User']}],
+    users,
+    groups: [{id: 'group-1', displayName: config.teamGovernance.teams[0].groupDisplayName, members: [{id: 'extra-user', userPrincipalName: 'extra@example.test'}]}],
+    assignments: {}
+  }));
+  const shim = `#!${process.execPath}
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+const command = args.join(' ');
+const option = name => args[args.indexOf(name) + 1];
+const statePath = process.env.GOVERNANCE_STATE;
+const state = JSON.parse(fs.readFileSync(statePath));
+fs.appendFileSync(process.env.GOVERNANCE_LOG, JSON.stringify(args) + '\\n');
+const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
+const emit = value => process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value));
+const body = () => { const raw = option('--body'); return JSON.parse(raw.startsWith('@') ? fs.readFileSync(raw.slice(1)) : raw); };
+if (command.startsWith('account show')) emit({tenantId: '${tenant}'});
+else if (command.startsWith('ad app show')) emit({id: 'gateway-app-object', appRoles: state.roles});
+else if (command.startsWith('ad sp show')) emit('gateway-sp-object');
+else if (command.startsWith('ad group list')) {
+  const filter = option('--filter');
+  emit(state.groups.filter(group => filter.includes(group.displayName.replaceAll("'", "''"))));
+} else if (command.startsWith('ad group create')) {
+  const group = {id: 'group-' + (state.groups.length + 1), displayName: option('--display-name'), members: []};
+  state.groups.push(group); save(); emit(group);
+} else if (command.startsWith('ad user show')) {
+  const upn = option('--id'); if (!state.users[upn]) process.exit(3); emit({id: state.users[upn], userPrincipalName: upn});
+} else if (command.startsWith('ad group member list')) {
+  emit(state.groups.find(group => group.id === option('--group')).members);
+} else if (command.startsWith('ad group member add')) {
+  const group = state.groups.find(item => item.id === option('--group'));
+  const id = option('--member-id'); const upn = Object.keys(state.users).find(key => state.users[key] === id);
+  group.members.push({id, userPrincipalName: upn}); save();
+} else if (args[0] === 'rest' && option('--method').toUpperCase() === 'PATCH') {
+  state.roles = body().appRoles; save();
+} else if (args[0] === 'rest' && option('--method').toUpperCase() === 'GET') {
+  const groupId = option('--url').split('/groups/')[1].split('/')[0]; emit({value: state.assignments[groupId] || []});
+} else if (args[0] === 'rest' && option('--method').toUpperCase() === 'POST') {
+  const assignment = body(); (state.assignments[assignment.principalId] ||= []).push(assignment); save();
+} else if (command.startsWith('deployment group create')) {
+  const parameterArg = option('--parameters');
+  state.deploymentParameters = JSON.parse(fs.readFileSync(parameterArg.slice(1)));
+  save();
+  const values = {teamGovernanceModeNamedValue: 'team-governance-mode', teamsJsonNamedValue: 'team-governance-teams-json', profilesJsonNamedValue: 'team-governance-profiles-json', workbookId: '/workbooks/team-governance', claudeTeamsFunctionName: 'ClaudeTeams', alertsCreated: false};
+  emit({properties: {provisioningState: 'Succeeded', outputs: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {value}]))}});
+} else { process.stderr.write('Unexpected Azure command: ' + command); process.exit(4); }
+`;
+  const az = join(bin, 'az');
+  writeFileSync(az, shim);
+  chmodSync(az, 0o755);
+  const configPath = join(directory, 'admin.json');
+  writeFileSync(configPath, JSON.stringify(config));
+  return {configPath, statePath, log, env: {...process.env, PATH: `${bin}:${process.env.PATH}`, GOVERNANCE_STATE: statePath, GOVERNANCE_LOG: log}};
 }
 
 test('bash: minimum-input live export prompts and discovers gateway settings', () => {
@@ -285,11 +354,160 @@ for (const platform of ['bash', 'pwsh']) {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(existsSync(log), false, 'dry run must not invoke tools');
       assert.equal(existsSync(config.onboardingOutput), false);
+      delete config.foundryResourceGroup;
+      writeFileSync(configPath, JSON.stringify(config));
+      result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
+      assert.equal(result.status, 0, result.stderr, 'legacy config must default Foundry to the gateway resource group');
+      config.foundryResourceGroup = 'test-foundry-rg';
       config.budgetLocation = 'eastus';
       writeFileSync(configPath, JSON.stringify(config));
       result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
       assert.notEqual(result.status, 0, 'reject cross-region diagnostic Event Hub');
       assert.equal(existsSync(log), false);
+    } finally { rmSync(directory, {recursive: true, force: true}); }
+  });
+
+  test(`${platform}: interactive admin dry run builds team config without Azure calls`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'admin interactive dry run '));
+    try {
+      const config = adminConfig(directory);
+      const {env, configPath, log} = mockEnvironment(directory, config);
+      const args = platform === 'bash'
+        ? [join(root, `admin/claude-gateway-setup.${suffix}`), '--config', configPath, '--interactive', '--dry-run']
+        : ['-NoProfile', '-File', join(root, `admin/claude-gateway-setup.${suffix}`), '-ConfigPath', configPath, '-Interactive', '-DryRun'];
+      const input = `${'\n'.repeat(11)}yes\nPlatform Team\none@example.test,two@example.test\n\n\n\n1,3\nno\n`;
+      const result = spawnSync(platform, args, {encoding: 'utf8', env, input});
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /Team role \[platform-team\.regular\]/);
+      assert.match(result.stderr, /1=claude-sonnet-5, 2=claude-haiku-4-5, 3=claude-opus-5/);
+      assert.match(result.stdout, /DRY RUN: configuration validated/);
+      assert.equal(existsSync(log), false, 'interactive dry run must not invoke tools');
+    } finally { rmSync(directory, {recursive: true, force: true}); }
+  });
+
+  test(`${platform}: interactive preflight creates the named gateway identity`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'admin gateway identity '));
+    try {
+      const config = adminConfig(directory);
+      const {env, configPath, log} = mockEnvironment(directory, config);
+      const args = platform === 'bash'
+        ? [join(root, `admin/claude-gateway-setup.${suffix}`), '--config', configPath, '--interactive', '--stage', 'preflight']
+        : ['-NoProfile', '-File', join(root, `admin/claude-gateway-setup.${suffix}`), '-ConfigPath', configPath, '-Interactive', '-Stage', 'preflight'];
+      const input = `${'\n'.repeat(4)}eastus\n${'\n'.repeat(6)}no\n`;
+      const result = spawnSync(platform, args, {encoding: 'utf8', env, input});
+      assert.equal(result.status, 0, result.stderr);
+      const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      const createdApp = calls.find(call => call.tool === 'az' && call.args.slice(0, 3).join(' ') === 'ad app create');
+      assert.equal(createdApp.args[createdApp.args.indexOf('--display-name') + 1], 'Claude Gateway - test-apim');
+      assert.ok(calls.some(call => call.tool === 'az' && call.args[0] === 'rest' && call.args.includes('PATCH')));
+      assert.ok(calls.some(call => call.tool === 'az' && call.args.slice(0, 3).join(' ') === 'ad sp create' && call.args.includes(config.gatewayAudience)));
+    } finally { rmSync(directory, {recursive: true, force: true}); }
+  });
+
+  test(`${platform}: teamGovernance config validation`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'admin team governance '));
+    try {
+      const config = adminConfig(directory);
+      const {env, configPath} = mockEnvironment(directory, config);
+      const args = platform === 'bash' ? ['--config', configPath, '--dry-run'] : ['-ConfigPath', configPath, '-DryRun'];
+      let result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
+      assert.equal(result.status, 0, result.stderr, 'example teamGovernance config must be valid');
+
+      for (const team of config.teamGovernance.teams) delete team.allowedModels;
+      writeFileSync(configPath, JSON.stringify(config));
+      result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
+      assert.equal(result.status, 0, result.stderr, 'omitting allowedModels must allow all supported models for backward compatibility');
+
+      delete config.teamGovernance;
+      writeFileSync(configPath, JSON.stringify(config));
+      result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
+      assert.equal(result.status, 0, result.stderr, 'omitting teamGovernance must remain valid for backward compatibility');
+
+      const mutations = [
+        config => { config.teamGovernance.mode = 'bogus'; },
+        config => { config.teamGovernance.teams[1].id = config.teamGovernance.teams[0].id; },
+        config => { config.teamGovernance.teams[1].groupDisplayName = config.teamGovernance.teams[0].groupDisplayName; },
+        config => { config.teamGovernance.teams[0].profile = 'nonexistent'; },
+        config => { config.teamGovernance.teams[0].defaultUserTier = 'enterprise'; },
+        config => { config.teamGovernance.teams[1].members[0] = config.teamGovernance.teams[0].members[0]; },
+        config => { config.teamGovernance.profiles[1].roleValue = config.teamGovernance.profiles[0].roleValue; },
+        config => { config.teamGovernance.actionGroupIds = ['/not/an/action-group']; },
+        config => { config.teamGovernance.teams[0].members = []; },
+        config => { config.teamGovernance.teams[0].allowedModels = []; },
+        config => { config.teamGovernance.teams[0].allowedModels = ['claude-sonnet-5', 'claude-sonnet-5']; },
+        config => { config.teamGovernance.teams[0].allowedModels = ['claude-unknown']; }
+      ];
+      for (const mutate of mutations) {
+        const invalid = adminConfig(directory);
+        mutate(invalid);
+        writeFileSync(configPath, JSON.stringify(invalid));
+        result = invoke(`admin/claude-gateway-setup.${suffix}`, args, env);
+        assert.notEqual(result.status, 0, `expected rejection for ${mutate}`);
+      }
+    } finally { rmSync(directory, {recursive: true, force: true}); }
+  });
+
+  test(`${platform}: standalone team governance converges additively and fails safely`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'team governance workflow '));
+    try {
+      const config = adminConfig(directory);
+      config.teamGovernance.mode = 'observe';
+      const {env, configPath, statePath, log} = governanceMockEnvironment(directory, config);
+      const manifestPath = join(directory, 'manifest.json');
+      const applyArgs = platform === 'bash'
+        ? ['--config', configPath, '--yes', '--manifest-output', manifestPath]
+        : ['-ConfigPath', configPath, '-Yes', '-ManifestOutput', manifestPath];
+      let result = invoke(`admin/setup-teams-governance-claude-gateway.${suffix}`, applyArgs, env);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const manifest = JSON.parse(readFileSync(manifestPath));
+      assert.equal(manifest.ambiguousMembers.length, 0);
+      assert.ok(manifest.teams.every(team => team.roleAssignments.length === 4));
+      let state = JSON.parse(readFileSync(statePath));
+      assert.ok(state.roles.some(role => role.value === 'Other.Product'), 'unrelated app roles survive');
+      assert.ok(state.groups[0].members.some(member => member.id === 'extra-user'), 'undeclared members survive');
+      assert.ok(state.groups.every(group => (state.assignments[group.id] || []).length === 4), JSON.stringify(state.assignments));
+      assert.equal(state.deploymentParameters.apimName.value, config.apimName);
+      assert.equal(state.deploymentParameters.logAnalyticsWorkspaceId.value, config.workspaceResourceId);
+      assert.equal(state.deploymentParameters.logAnalyticsWorkspaceName.value, config.workspaceResourceId.split('/').at(-1));
+      assert.equal(state.deploymentParameters.workbookLocation.value, config.workbookLocation);
+      assert.equal(state.deploymentParameters.teamGovernanceMode.value, config.teamGovernance.mode);
+      assert.deepEqual(state.deploymentParameters.profiles.value, config.teamGovernance.profiles);
+      assert.deepEqual(state.deploymentParameters.teams.value, config.teamGovernance.teams);
+      assert.deepEqual(state.deploymentParameters.actionGroupIds.value, config.teamGovernance.actionGroupIds);
+      const firstCalls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(firstCalls.every(args => !(args[0] === 'ad' && args.includes('--subscription'))));
+      assert.equal(firstCalls.filter(args => args.slice(0, 3).join(' ') === 'deployment group create').length, 1);
+
+      writeFileSync(log, '');
+      result = invoke(`admin/setup-teams-governance-claude-gateway.${suffix}`, applyArgs, env);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const rerun = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+      assert.equal(rerun.filter(args => args.slice(0, 3).join(' ') === 'deployment group create').length, 1, 'direct apply redeploys module 22 idempotently');
+      assert.equal(rerun.filter(args => args.includes('PATCH') || args.includes('POST') || args.slice(0, 4).join(' ') === 'ad group create --display-name' || args.slice(0, 4).join(' ') === 'ad group member add').length, 0, 'converged rerun performs no writes');
+
+      writeFileSync(log, '');
+      const checkArgs = platform === 'bash'
+        ? ['--config', configPath, '--check', '--manifest-output', manifestPath]
+        : ['-ConfigPath', configPath, '-Check', '-ManifestOutput', manifestPath];
+      result = invoke(`admin/setup-teams-governance-claude-gateway.${suffix}`, checkArgs, env);
+      assert.notEqual(result.status, 0, 'check mode reports preserved extra membership as drift');
+      assert.equal(JSON.parse(readFileSync(manifestPath)).checkMode, true);
+      const checkCalls = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+      assert.equal(checkCalls.filter(args => args.slice(0, 3).join(' ') === 'deployment group create').length, 0, 'check mode must not deploy module 22');
+      assert.equal(checkCalls.filter(args => args.includes('PATCH') || args.includes('POST') || args.slice(0, 3).join(' ') === 'ad group create' || args.slice(0, 4).join(' ') === 'ad group member add').length, 0, 'check mode performs no writes');
+
+      const missing = JSON.parse(readFileSync(configPath));
+      missing.teamGovernance.teams[0].members[0] = 'missing@example.test';
+      writeFileSync(configPath, JSON.stringify(missing));
+      result = invoke(`admin/setup-teams-governance-claude-gateway.${suffix}`, applyArgs, env);
+      assert.notEqual(result.status, 0, 'missing users must fail apply');
+
+      writeFileSync(configPath, JSON.stringify(config));
+      state = JSON.parse(readFileSync(statePath));
+      state.groups.push({...state.groups[0], id: 'duplicate-group'});
+      writeFileSync(statePath, JSON.stringify(state));
+      result = invoke(`admin/setup-teams-governance-claude-gateway.${suffix}`, applyArgs, env);
+      assert.notEqual(result.status, 0, 'duplicate group display names must fail');
     } finally { rmSync(directory, {recursive: true, force: true}); }
   });
 
@@ -304,17 +522,42 @@ for (const platform of ['bash', 'pwsh']) {
       let calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const deployments = calls.filter(call => call.parameters);
       assert.deepEqual(deployments.map(call => call.args[call.args.indexOf('--name') + 1]), [
-        '04-apim-gateway', '14-claude-tiers', '16-budget-platform', 'pricing-access', '04-apim-gateway', '09-workbook', '10-claude-usage-summary-rule', '11-grafana'
+        '04-apim-gateway', '14-claude-tiers', '16-budget-platform', 'pricing-access', '22-team-governance', '04-apim-gateway', '09-workbook', '10-claude-usage-summary-rule', '11-grafana'
       ]);
       for (const call of deployments.slice(0, 3)) assert.deepEqual(call.parameters.tiersConfig.value, config.tiersConfig);
       assert.equal(deployments[1].args[deployments[1].args.indexOf('--resource-group') + 1], 'log-rg');
       assert.equal(deployments[2].parameters.apimIdentityClientId.value, 'mi-application-id-not-object-id');
+      assert.deepEqual(deployments[2].parameters.teamGovernanceConfig.value, config.teamGovernance);
+      assert.equal(deployments[0].parameters.foundryResourceGroup.value, config.foundryResourceGroup);
+      assert.equal(deployments[3].parameters.foundryResourceGroup.value, config.foundryResourceGroup);
+      assert.equal(deployments[3].parameters.cosmosAccountName.value, 'test-cosmos');
+      assert.equal(deployments[3].parameters.enableReconciler.value, true);
       assert.equal(deployments[0].parameters.publisherName.value, 'true', 'string parameters must not be coerced into booleans');
-      assert.equal(deployments[4].parameters.budgetApiAudience.value, config.budgetApiAudience);
-      assert.equal(deployments[4].parameters.eventHubAuthorizationRuleId.value, '/rule/id');
+      assert.equal(deployments[0].parameters.deployPolicy.value, false, 'bootstrap must not reference module-22 named values');
+      assert.equal(deployments[4].parameters.teamGovernanceMode.value, config.teamGovernance.mode);
+      assert.deepEqual(deployments[4].parameters.profiles.value, config.teamGovernance.profiles);
+      assert.deepEqual(deployments[4].parameters.teams.value, config.teamGovernance.teams);
+      assert.deepEqual(deployments[4].parameters.actionGroupIds.value, config.teamGovernance.actionGroupIds);
+      assert.equal(deployments[5].parameters.deployPolicy.value, true);
+      assert.equal(deployments[5].parameters.budgetApiAudience.value, config.budgetApiAudience);
+      assert.equal(deployments[5].parameters.eventHubAuthorizationRuleId.value, '/rule/id');
       assert.equal(calls.filter(call => call.tool === 'func').length, 2);
       const pricing = calls.find(call => call.tool === 'mock-python' && call.args[0].endsWith('15-load-pricing.py'));
       assert.ok(pricing.args.includes('--redis-host') && pricing.args.includes('--dcr-endpoint'));
+      const reconciler = calls.find(call => call.tool === 'mock-python' && call.args[0].endsWith('20-cost-reconciler.py'));
+      assert.ok(reconciler, 'reconciliation must run when enabled');
+      assert.match(reconciler.args[reconciler.args.indexOf('--resource-id') + 1], /resourceGroups\/test-foundry-rg\/providers\/Microsoft\.CognitiveServices\/accounts\/test-foundry$/);
+      for (const call of calls.filter(call => call.tool === 'az' && call.args[0] === 'cognitiveservices')) {
+        assert.equal(call.args[call.args.indexOf('--resource-group') + 1], config.foundryResourceGroup);
+      }
+      for (const [option, expected] of [
+        ['--cosmos-endpoint', 'https://test-cosmos.documents.azure.com:443/'],
+        ['--cosmos-database', 'claude'],
+        ['--cosmos-container', 'usage'],
+        ['--redis-host', 'test-redis.redis.cache.windows.net']
+      ]) assert.equal(reconciler.args[reconciler.args.indexOf(option) + 1], expected);
+      assert.deepEqual(JSON.parse(reconciler.args[reconciler.args.indexOf('--tiers-json') + 1]), config.tiersConfig);
+      assert.deepEqual(JSON.parse(reconciler.args[reconciler.args.indexOf('--team-governance-json') + 1]), config.teamGovernance);
       const exported = JSON.parse(readFileSync(config.onboardingOutput));
       assert.equal(exported.models.opus, 'opus-deployment');
       assert.equal(exported.tiers, undefined);
@@ -326,13 +569,13 @@ for (const platform of ['bash', 'pwsh']) {
       result = invoke(`admin/claude-gateway-setup.${suffix}`, args, {...env, MOCK_EXISTING: '1'});
       assert.equal(result.status, 0, result.stdout + result.stderr);
       calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(calls.filter(call => call.parameters?.apimName).length, 1, 'rerun must skip placeholder bootstrap');
+      assert.equal(calls.filter(call => call.parameters?.apimName).length, 2, 'rerun deploys governance resources and final APIM, but skips placeholder bootstrap');
       assert.equal(calls.filter(call => call.tool === 'az' && call.args.slice(0, 3).join(' ') === 'ad app create').length, 0, 'rerun must reuse Desktop client');
       writeFileSync(log, '');
       result = invoke(`admin/claude-gateway-setup.${suffix}`, args, {...env, MOCK_EXISTING: '1', MOCK_FAIL_PUBLISH: '1'});
       assert.notEqual(result.status, 0, 'publication failure must propagate');
       calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(calls.filter(call => call.parameters?.apimName).length, 0, 'do not wire final gateway after publication failure');
+      assert.equal(calls.filter(call => call.parameters?.apimName).length, 0, 'do not deploy governance or wire final gateway after publication failure');
       assert.ok(calls.every(call => !call.args.some(arg => ['delete', 'purge'].includes(arg))));
       const exportArgs = platform === 'bash'
         ? ['--subscription-id', tenant, '--resource-group', config.resourceGroup, '--client-id', tenant, '--opus-model', 'opus', '--sonnet-model', 'sonnet', '--haiku-model', 'haiku', '--output', config.onboardingOutput, '--force']
@@ -414,3 +657,118 @@ function Invoke-WebRequest {
     } finally { rmSync(directory, {recursive: true, force: true}); }
   });
 }
+
+test('bash: config-free interactive dry run builds config and non-interactive mode requires a file', () => {
+  const localConfig = join(root, 'admin/setup.local.json');
+  const original = readFileSync(localConfig, 'utf8');
+  const workspaceId = `/subscriptions/${tenant}/resourceGroups/log-rg/providers/Microsoft.OperationalInsights/workspaces/test-logs`;
+  const input = [
+    tenant, tenant, '',
+    'test-rg', 'test-foundry-rg', 'test-apim', 'centralus', 'eastus', 'eastus', 'admin@example.test', audience,
+    workspaceId, 'test-foundry', 'testbudget', 'no'
+  ].join('\n') + '\n';
+  try {
+    let result = spawnSync('bash', [join(root, 'admin/claude-gateway-setup.sh'), '--interactive', '--dry-run'],
+      {encoding: 'utf8', input, timeout: 10000});
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /generated configuration was validated but not written/);
+    assert.match(result.stdout, /DRY RUN: configuration validated/);
+    assert.equal(readFileSync(localConfig, 'utf8'), original, 'dry run must not write generated config');
+
+    result = spawnSync('bash', [join(root, 'admin/claude-gateway-setup.sh'), '--non-interactive', '--dry-run'],
+      {encoding: 'utf8', timeout: 10000});
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Non-interactive mode requires --config FILE/);
+  } finally {
+    writeFileSync(localConfig, original);
+  }
+});
+
+test('bash: debug mode streams timestamped output to the terminal and a log file', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gateway debug '));
+  const configPath = join(directory, 'setup.json');
+  const logPath = join(directory, 'logs', 'setup.log');
+  try {
+    writeFileSync(configPath, readFileSync(join(root, 'admin/setup.local.json')));
+    const result = spawnSync('bash', [join(root, 'admin/claude-gateway-setup.sh'),
+      '--config', configPath, '--dry-run', '--debug', '--log-file', logPath],
+    {encoding: 'utf8', timeout: 10000});
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /DEBUG: Debug logging enabled/);
+    assert.match(result.stdout, /DRY RUN: configuration validated/);
+    assert.equal(existsSync(logPath), true);
+    const log = readFileSync(logPath, 'utf8');
+    assert.match(log, /Streaming setup output to/);
+    assert.match(log, /DEBUG: Debug logging enabled/);
+    assert.match(log, /DRY RUN: configuration validated/);
+  } finally { rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('admin setup scripts install and verify missing local prerequisites', () => {
+  const bash = readFileSync(join(root, 'admin/claude-gateway-setup.sh'), 'utf8');
+  const powershell = readFileSync(join(root, 'admin/claude-gateway-setup.ps1'), 'utf8');
+
+  assert.match(bash, /brew install azure-functions-core-tools@4/);
+  assert.match(bash, /"\$PYTHON" -m pip install azure-identity azure-monitor-ingestion requests redis/);
+  assert.ok(bash.indexOf('DRY RUN: configuration validated') < bash.indexOf('\nensure_prerequisites\n'), 'Bash dry run must exit before installing prerequisites');
+
+  assert.match(powershell, /winget install --id Microsoft\.Azure\.FunctionsCoreTools/);
+  assert.match(powershell, /choco install azure-functions-core-tools-4 --yes/);
+  assert.match(powershell, /brew install azure-functions-core-tools@4/);
+  assert.match(powershell, /-m pip install azure-identity azure-monitor-ingestion requests redis/);
+  assert.ok(powershell.indexOf("if ($DryRun)") < powershell.indexOf('\n    Install-Prerequisites\n'), 'PowerShell dry run must exit before installing prerequisites');
+});
+
+test('interactive admin setup derives the gateway audience from a named Entra application', () => {
+  const bash = readFileSync(join(root, 'admin/claude-gateway-setup.sh'), 'utf8');
+  const powershell = readFileSync(join(root, 'admin/claude-gateway-setup.ps1'), 'utf8');
+
+  for (const script of [bash, powershell]) {
+    assert.match(script, /Enter a name for the gateway service principal/);
+    assert.doesNotMatch(script, /Gateway audience application ID/);
+    assert.match(script, /ad app create --display-name .* --sign-in-audience AzureADMyOrg/);
+    assert.match(script, /ad sp create --id/);
+    assert.match(script, /gatewayAudience =/);
+    assert.match(script, /tokenResource =/);
+  }
+});
+
+test('APIM policy preserves phase 5 governance contracts', () => {
+  const policy = readFileSync(join(root, 'infra/03-apim-claude-policy.xml'), 'utf8');
+  assert.match(policy, /GET \/v1\/models|\/v1\/models/);
+  assert.match(policy, /Claude\.Suspended/);
+  assert.match(policy, /bud:v2:/);
+  assert.match(policy, /user-budget/);
+  assert.match(policy, /team-budget/);
+  assert.match(policy, /x-caller-team-id/);
+  assert.match(policy, /x-caller-team-profile/);
+  assert.match(policy, /x-team-governance-state/);
+  assert.match(policy, /FromBase64String\(&quot;\{\{team-governance-teams-json\}\}&quot;\)/);
+  assert.match(policy, /FromBase64String\(&quot;\{\{team-governance-profiles-json\}\}&quot;\)/);
+  assert.match(policy, /preserveContent: true/);
+  assert.match(policy, /team-model-policy/);
+  assert.match(policy, /allowedModels/);
+  assert.doesNotMatch(policy, /claude-opus-4-5/);
+  assert.match(policy, /name="enforcementScope" value="user-token-limit"/);
+  assert.match(policy, /name="enforcementScope" value="team-token-limit"/);
+  assert.ok((policy.match(/<llm-token-limit/g) || []).length >= 4, 'user and profile-selected team token policies must coexist');
+  assert.ok(policy.indexOf('context.Request.Url.Path.Contains(&quot;/models&quot;)') < policy.indexOf('Claude.Suspended&quot;) >= 0'), 'model discovery exemption must precede suspension and budget enforcement');
+  assert.ok(policy.indexOf('team-model-policy') < policy.indexOf('bud:v2:'), 'team model denial must precede budget accounting');
+});
+
+test('standalone team governance scripts preserve role and safety parity', () => {
+  const bash = readFileSync(join(root, 'admin/setup-teams-governance-claude-gateway.sh'), 'utf8');
+  const powershell = readFileSync(join(root, 'admin/setup-teams-governance-claude-gateway.ps1'), 'utf8');
+  for (const [platform, source] of [['bash', bash], ['pwsh', powershell]]) {
+    assert.match(source, /Claude\.User/, `${platform} must assign gateway access`);
+    assert.match(source, /Claude\.Tier\./, `${platform} must assign the configured individual tier`);
+    assert.match(source, /teamRoleValue|TEAM_ROLE_VALUE/, `${platform} must assign one team role`);
+    assert.match(source, /roleValue|PROFILE_ROLE_VALUE/, `${platform} must assign one profile role`);
+    assert.doesNotMatch(source, /ad group member remove|--method DELETE/i, `${platform} must remain additive-only`);
+  }
+  assert.match(bash, /azure\(\) \{ az "\$@" --only-show-errors; \}/);
+  assert.match(powershell, /& az @args --only-show-errors/);
+  assert.doesNotMatch(bash, /azure\(\) \{[^}]*--subscription/);
+  assert.doesNotMatch(powershell, /& az @args --subscription/);
+});

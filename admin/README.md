@@ -5,24 +5,30 @@ Run the existing [infrastructure deployment steps](../infra/README.md) through e
 [claude-gateway-setup.ps1](claude-gateway-setup.ps1) with PowerShell 7.2+.
 Both use [setup.example.json](setup.example.json) as the configuration template.
 Parameters are declared there, and script options/state are declared at the top of
-each entry point. Neither script creates Entra registrations, assigns developer
-roles, deletes resources, purges soft-deleted APIM services, or requests quota increases.
+each entry point. The main scripts create or reuse the Desktop public-client registration
+and, when team governance is active, invoke the additive team-governance reconciler.
+They do not delete resources or directory assignments, purge soft-deleted APIM services,
+or request quota increases.
 
 ## Prerequisites
 
-- Existing subscription, resource group, Foundry account with Claude deployments,
-  and Log Analytics workspace. Foundry must be in the deployment resource group.
-  The workspace can be in another resource group in the same subscription.
+- Existing subscription, gateway resource group, Foundry account with Claude deployments,
+  and Log Analytics workspace. Set `resourceGroup` to the gateway deployment group and
+  `foundryResourceGroup` to the group containing the Foundry account. The Foundry and
+  workspace can be in other resource groups in the same subscription. For compatibility,
+  omitting `foundryResourceGroup` defaults it to `resourceGroup`.
 - Gateway Entra registration with v2 tokens, the configured identifier URI, and an
   enabled `Claude.User` app role. Assign that role to developers. Optional
   `Claude.Tier.Pro` and `Claude.Tier.Basic` roles select tiers; otherwise users get
   `lite`. `Claude.Suspended` blocks a user. Group membership alone is not enough
   unless the group has the appropriate application role assignment.
-- Separate budget API registration/service principal. The scripts discover APIM's
-  managed identity **application/client ID** and pass it to Easy Auth. This is not
-  the identity's object ID.
-- Azure CLI with Bicep, `jq`, Azure Functions Core Tools v4, and a Python environment
-  with `azure-identity`, `azure-monitor-ingestion`, `requests`, and `redis`.
+- The scripts create or reuse a separate budget API registration/service principal
+  when `budgetApiAudience` is empty. They also discover APIM's managed identity
+  **application/client ID** and pass it to Easy Auth. This is not the identity's object ID.
+- Azure CLI with Bicep, `jq`, and a Python environment with `pip`. Before the main
+  preflight, the setup wrappers install Azure Functions Core Tools v4 when `func`
+  is missing and install missing `azure-identity`, `azure-monitor-ingestion`,
+  `requests`, and `redis` packages into the configured Python environment.
   Set `pythonExecutable` to the executable name or absolute path, not a command
   containing arguments. Function remote builds use the existing Python 3.11 apps.
 - Azure CLI `quota` extension when `checkEp1Quota` is enabled. Register the
@@ -30,21 +36,40 @@ roles, deletes resources, purges soft-deleted APIM services, or requests quota i
   script displays EP1 limit/usage; this does not guarantee available capacity.
 - An identity able to deploy resources and assign roles in both resource groups,
   read the existing Entra apps/service principals, and publish Function code.
-  Python's `DefaultAzureCredential` must resolve to `pricingPublisherPrincipalId`
-  in `tenantId`; preflight checks this without displaying its access token.
+  Preflight resolves the active Python `DefaultAzureCredential`, checks it is in
+  `tenantId`, and auto-detects `pricingPublisherPrincipalId`/`pricingPublisherPrincipalType`
+  from it (via a Microsoft Graph directory-object lookup) without displaying its
+  access token. Set `pricingPublisherPrincipalId` explicitly in the config only to
+  pin a specific value; preflight then verifies the credential matches it instead.
 - Data-plane access from the admin machine to Redis and DCR ingestion. The wrapper
   grants the configured publisher Redis Data Contributor; template `14` grants
   DCR publishing access. Optional reconciliation also grants Foundry Monitoring Reader.
 
-On macOS, tools can be installed using your organization's approved package manager.
-On Windows, install PowerShell 7.2+ and put `az`, `jq`, `func`, and the selected
-Python executable on PATH. Windows PowerShell 5.1 is not supported. The scripts do
-not change execution policy or bypass organizational controls.
+Automatic Core Tools installation uses Homebrew on macOS and WinGet, with
+Chocolatey as a fallback, on Windows. Install PowerShell 7.2+ on Windows and put
+`az`, `jq`, and the selected Python executable on PATH. Windows PowerShell 5.1 is
+not supported. Dry runs remain offline and install nothing. The scripts do not
+install package managers, change execution policy, elevate privileges, or bypass
+organizational controls.
 
 ## Configure and Run
 
-Create your local `admin/setup.local.json` using the structure in
-[setup.example.json](setup.example.json). Replace every placeholder.
+On macOS/Linux, interactive setup can create `admin/setup.local.json` from the
+defaults in [setup.example.json](setup.example.json). From the repository root, run:
+
+```bash
+bash admin/claude-gateway-setup.sh --interactive --stage preflight
+```
+
+The script prompts for all required subscription, tenant, identity, resource, and
+optional team values; validates the effective configuration; saves it with restricted
+file permissions; and then runs read-only preflight. Add `--yes` instead of
+`--stage preflight` when ready to authorize the full deployment. Interactive mode is
+automatic when standard input is a terminal, so `--interactive` is optional there.
+
+For automation, create `admin/setup.local.json` using the structure in
+[setup.example.json](setup.example.json), replace every placeholder, and pass it with
+`--config`. Explicit `--non-interactive` mode requires a configuration file.
 
 Important configuration choices:
 
@@ -55,7 +80,7 @@ Important configuration choices:
 | `cosmosLocation`, `workbookLocation` | Explicit independent locations. Regional availability still applies. |
 | `gatewayAudience` | Bare gateway application/client ID used in v2 `aud`. |
 | `tokenResource` | Registered identifier URI used to acquire a gateway token, commonly `api://<gateway-client-id>`. Not the Foundry/Cognitive Services audience. |
-| `budgetApiAudience` | Separate budget API application/client ID. |
+| `budgetApiAudience` | Separate budget API application/client ID. Leave empty to create or reuse `Claude Budget API - <namePrefix>`. |
 | `tiersConfig` | Exactly `pro`, `basic`, `lite`; `tpm` is per minute, `tokenQuota` is monthly tokens, `costQuota` is monthly USD. Passed identically to templates `04`, `14`, and `16`. |
 | `models` | Leave aliases empty to discover deployed Opus, Sonnet, and Haiku. If there is not exactly one candidate per family, specify the desired deployment name. A fallback must be chosen explicitly. |
 | `clientConfiguration.clientId` | Desktop OIDC public-client registration ID, not the gateway API audience. Empty prompts during export. |
@@ -64,12 +89,60 @@ Important configuration choices:
 | `storageGovernanceTags` | Organization-approved tags. Empty by default; the wrapper does not apply the template's tenant-specific Ignore tags automatically. |
 | `onboardingOutput` | Generated handoff JSON. Relative paths resolve from the repository root. |
 
+### Team Governance
+
+`teamGovernance` is an optional top-level block in `setup.example.json` that
+declares team-level budget profiles and direct membership as source-controlled config.
+Omitting the key is valid and is treated as `{"mode":"off","profiles":[],"teams":[]}`.
+In `observe` or `enforce`, the main setup invokes the neighboring standalone Bash or
+PowerShell reconciler before deploying the final APIM policy.
+
+| Field | Meaning |
+|---|---|
+| `teamGovernance.mode` | `off`, `observe`, or `enforce`. Must default to `off` for backward compatibility. |
+| `teamGovernance.actionGroupIds[]` | Optional Azure Monitor action-group resource IDs. An empty array deploys the workbook without the five governance alert rules. |
+| `teamGovernance.profiles[]` | Named team-level budget profiles: `name`, `roleValue` (an Entra app role value in the `Claude.TeamProfile.*` namespace), and `tpm`/`tokenQuota`/`costQuota` aggregate limits for the team. |
+| `teamGovernance.teams[]` | One entry per governed team: stable `id`, display/group names, `Claude.Team.*` role, profile reference, default individual tier, `allowedModels`, and non-overlapping direct member UPNs. The governance scripts create or resolve the security group. |
+| `teamGovernance.teams[].allowedModels` | Non-empty unique subset of `claude-sonnet-5`, `claude-haiku-4-5`, and `claude-opus-5`. Omitting the property preserves backward compatibility and allows all three. |
+
+Validation rejects unknown `mode` values, duplicate team IDs/group display
+names/team role values/profile role values, a `profile` or `defaultUserTier`
+that does not exist, empty/duplicate/unsupported model allowlists, non-positive profile limits, and any member UPN listed
+under more than one team. Apply preflight also requires every listed user to resolve uniquely.
+
+Interactive setup presents the three model IDs as numbered options for every team and
+accepts comma-separated selections such as `1,3`. In `enforce` mode, APIM returns only
+that team's models from `GET /v1/models` and rejects an unlisted `/v1/messages` model
+with HTTP 403 and `x-claude-denied-by: team-model-policy`. Modes `off` and `observe`
+do not filter or deny models, preserving the staged governance rollout.
+
+The standalone scripts preserve existing app-role IDs, unrelated roles, extra group members,
+and unrelated assignments. They add missing direct members and assign each team group the required
+`Claude.User`, default `Claude.Tier.*`, `Claude.Team.*`, and `Claude.TeamProfile.*` roles.
+An authorized standalone apply also deploys `infra/22-team-governance.bicep`; that module embeds
+`infra/23-team-governance-workbook.json` at compile time, so workbook 23 is not deployed separately.
+Mode `off` still deploys the named values and workbook but skips Entra reconciliation. The full
+gateway setup suppresses this standalone deployment because it deploys module 22 itself immediately
+before the final APIM policy. The scripts never remove directory state. Use `--check` / `-Check` for read-only drift reporting,
+`--dry-run` / `-DryRun` for local validation, and `--yes` / `-Yes` only after reviewing the
+target tenant and config. Keep the emitted manifest as audit evidence.
+
+The operator needs delegated Microsoft Graph permissions sufficient to read users,
+applications, service principals, groups, members, and app-role assignments and to update
+the gateway app, create/update groups, add members, and create group app-role assignments.
+Common tenant grants are `User.Read.All`, `Application.ReadWrite.All`, and
+`Group.ReadWrite.All`; prefer a narrower custom role where available. Admin consent, Entra
+licensing for group-based enterprise-app assignment, and production apply approval remain
+tenant-owner responsibilities. Azure CLI authentication is reused; no Graph secret is stored.
+Role and membership changes appear only in newly issued access tokens.
+The operator also needs resource-group deployment permission for the standalone module-22 apply.
+
 Review the `PRICES` dictionary in [the pricing loader](../snippets/15-load-pricing.py)
 against your actual agreement and models. Rates are **per 1,000 tokens**. Ensure
 the model keys reported in usage have pricing entries. Missing Redis prices can
 produce zero-dollar charges. Set `options.pricesReviewed=true` only after review.
 
-From the repository root, first validate offline:
+To validate an existing configuration offline:
 
 ```bash
 bash admin/claude-gateway-setup.sh --config admin/setup.local.json --dry-run
@@ -80,8 +153,37 @@ bash admin/claude-gateway-setup.sh --config admin/setup.local.json --dry-run
 ```
 
 Dry run validates config and displays the sequence/options. It performs **no Azure
-calls, logins, installs, inference, or file writes**. It is not ARM what-if and
-cannot check identity, permissions, model availability, or capacity.
+calls, logins, installs, inference, or file writes**, except when an explicit
+`--log-file` is requested. It is not ARM what-if and
+cannot check identity, permissions, model availability, or capacity. A config-free
+interactive dry run validates the prompted configuration but does not save it.
+
+For timestamped progress, Azure CLI verbose diagnostics, failure line/command
+context, and a persistent copy of the live terminal stream:
+
+```bash
+bash admin/claude-gateway-setup.sh \
+  --config admin/setup.local.json \
+  --non-interactive \
+  --yes \
+  --debug \
+  --log-file logs/claude-gateway-setup.log
+```
+
+The log is streamed through `tee`, so output remains visible while the command runs.
+Debug mode intentionally does not enable raw `set -x` tracing, which could expose
+tokens or request bodies.
+
+When run from a terminal, the Bash script can additionally prompt for subscription,
+tenant, pricing-publisher identity, and publisher name when creating its local config.
+Both main scripts prompt before validation for the resource group, APIM and resource
+locations, publisher email, gateway application ID, workspace resource ID, Foundry
+name, resource prefix, and optional team governance entries. Use `--interactive` /
+`-Interactive` to prompt with redirected input, or
+`--non-interactive` / `-NonInteractive` for automation. Prompted values are held in a
+temporary effective configuration and passed to the team-governance reconciler; the
+source configuration file is not changed when one was supplied explicitly. A Bash
+interactive run without `--config` creates or updates `admin/setup.local.json`.
 
 After logging into the configured tenant/subscription, run read-only preflight:
 
@@ -111,13 +213,15 @@ bash admin/claude-gateway-setup.sh --config admin/setup.local.json --yes
 The workflow is:
 
 1. Preflight and optional provider registration.
-2. Bootstrap APIM with template `04` only when it does not exist.
+2. Bootstrap APIM with template `04` and policy deployment disabled when it does not exist.
 3. Deploy tiers/DCR with `14` into the workspace resource group.
 4. Deploy `16` with the current APIM identity client ID and budget API audience.
 5. Grant pricing access and load prices into **both** Log Analytics and Redis.
 6. Publish the budget API and usage processor from their existing source folders.
-7. Redeploy `04` with the actual budget endpoint and Event Hub outputs.
-8. Export the developer JSON; optionally run smoke tests, reporting, and reconciliation.
+7. Reconcile Entra teams when governance mode is active, then deploy module `22` named values,
+   `ClaudeTeams()` metadata, workbook, and optional alerts.
+8. Redeploy `04` with policy enabled and the actual budget/Event Hub outputs.
+9. Export developer JSON; optionally run reporting, smoke tests, and Cosmos-ledger replay.
 
 StandardV2 APIM, EP1 (two always-ready budget API instances), Redis, Cosmos, Event Hub,
 storage, monitoring, and optional Grafana incur charges. Use a maintenance window
@@ -138,9 +242,10 @@ Use `--stage` / `-Stage` with `--yes` / `-Yes` to resume `reporting`, `retention
   import the dashboard. Set name, location, and admin principal. The importing
   identity needs Grafana data-plane permissions; Azure resource Owner alone is
   insufficient. Prefer the executing identity as admin or grant it access beforehand.
-- `reconcile`: run one cost-reconciliation pass for `reconcileHours`. This does
-  **not** schedule a recurring job. Repeated rollups must be deduplicated using
-  `arg_max(TimeGenerated, *) by BinStart, Model` as in the existing reporting.
+- `reconcile`: run one reconciliation pass. It rolls up aggregate Foundry cache metrics and
+  rebuilds current-month user, tier, team, and profile Redis counters/flags from immutable
+  Cosmos rows. It rejects mapping drift instead of rewriting historic team attribution.
+  This does **not** schedule a recurring job.
 - `smokeTest`: use the exported handoff for one small billable inference request
   and an unauthenticated rejection check. The executing user needs `Claude.User`.
   This does not test tier exhaustion, suspension, streaming, or accounting delivery.
@@ -156,6 +261,24 @@ Region changes, APIM soft-delete conflicts, and stale Foundry role assignments
 after identity recreation require a separately reviewed migration or targeted
 repair. No deletion, purge, broad RBAC cleanup, or automatic quota increase is
 performed. Interrupting the CLI does not cancel an in-progress ARM deployment.
+
+### Governance operations
+
+- Onboard: add the UPN to exactly one team in config, review `--check`, approve/apply, obtain a
+  fresh token, and verify all four roles before traffic testing.
+- Transfer: update source config, then separately approve removal of old membership and role
+  assignments because reconciliation is additive-only. Do not promote while a fresh token has
+  multiple team/profile roles.
+- Tier/profile change: update config, apply, and verify a fresh token plus named values. Historical
+  Cosmos rows retain request-time attribution.
+- Emergency suspension: assign `Claude.Suspended`; existing tokens remain valid until refreshed.
+- Monthly reset/rebuild: Redis keys expire after month end. Reconciliation replaces current-month
+  state from Cosmos and stops on mapping drift.
+- Rollback: change governance mode from `enforce` to `observe` and redeploy module `22`/policy.
+  Individual controls remain active.
+
+Follow [the live validation checklist](../docs/team-governance-live-validation.md) for promotion,
+denial attribution, fail-open testing, and rollback evidence.
 
 ## Export Claude Client Configuration
 
@@ -238,9 +361,9 @@ The Desktop client ID is **not** the gateway API registration's audience. The se
 identity must be allowed to create/read Entra applications and must own or otherwise
 be allowed to update the gateway API application. No client secret is created.
 
-Users still need the gateway API's `Claude.User` application-role assignment. Setup
-does not assign that role because the admin config does not identify onboarding
-users or groups. The standalone export scripts remain read-only and prompt for a
+Users still need the gateway API's `Claude.User` application-role assignment. Active
+team governance assigns it to each declared team group; deployments without team governance
+must manage generic onboarding separately. The standalone export scripts remain read-only and prompt for a
 Desktop client ID; only the full setup scripts provision the registration. The
 issuer uses `https://login.microsoftonline.com/<tenant-id>/v2.0`.
 

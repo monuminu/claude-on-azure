@@ -34,6 +34,18 @@ deployment status below and does not establish live runtime readiness.
 | `14-claude-tiers.bicep` | `ClaudeTiers()` KQL function, the `PRICING_CL` table, and its DCR. |
 | `16-budget-platform.bicep` | Event Hub, Redis, Cosmos, and the two Function Apps. |
 | `21-reconciler-metrics-rbac.bicep` | Monitoring Reader for the cost reconciler, on the Foundry account. |
+| `22-team-governance.bicep` | Team named values, `ClaudeTeams()` KQL function, workbook, and optional alerts. |
+| `23-team-governance-workbook.json` | Team/user utilization, denials, identity drift, and processor health. |
+
+### Team governance ownership
+
+[`admin/setup.example.json`](../admin/setup.example.json) has an optional
+`teamGovernance` block is validated by [`admin/validate-config.jq`](../admin/validate-config.jq)
+and forwarded to module `16`, module `22`, and the APIM policy. Source config owns declared
+limits/mappings; the standalone admin scripts own additive Microsoft Graph reconciliation;
+Bicep owns Azure resources and settings. Redis is disposable enforcement state, while Cosmos
+is the immutable request ledger used to reconstruct user and team counters.
+
 
 The Python and shell that run *against* this platform live in
 [`../snippets/`](../snippets/) — the usage processor, the budget API, the pricing
@@ -76,8 +88,9 @@ Cloud APIs move. Verify against your own subscription.
 
 ## Deploy order
 
-The gateway and the budget platform reference each other, so **`04` is deployed
-twice**. That is expected, not a mistake.
+The gateway and the budget platform reference each other, so **`04` is deployed twice**.
+For a new APIM, the first pass uses `deployPolicy=false`; module `22` creates the named values
+referenced by the policy before the final `04` pass enables it.
 
 ### 1. The gateway
 
@@ -154,13 +167,14 @@ workspace name.
 Then deploy the two Function Apps from [`../snippets/`](../snippets/):
 `17-usage-processor/` and `18-budget-api/`.
 
-### 4. The gateway again
+### 4. Team governance and the gateway again
 
 This is not a second gateway. Re-deploying the same template with the same resource
 names updates the existing APIM resources. The first deployment creates APIM so its
 managed identity exists; step 3 then creates the Event Hub and Budget API whose IDs
-and URL APIM could not know on the first pass. This second pass connects those
-resources and completes the authenticated budget-check and usage-accounting paths.
+and URL APIM could not know. Reconcile Entra groups/app roles when mode is active,
+deploy `22-team-governance.bicep`, validate its outputs, then deploy `04` with
+`deployPolicy=true`. This ordering prevents unresolved APIM named-value references.
 
 ```mermaid
 flowchart LR
@@ -181,8 +195,8 @@ The values connect these parts as follows:
 - `eventHubAuthorizationRuleId` gives APIM diagnostics permission to send completed
    request records to the Event Hub namespace. `eventHubName` selects the Event Hub
    inside that namespace.
-- `budgetApiBaseUrl` tells the APIM policy where to call
-   `GET /v1/budget/<user-object-id>` before forwarding a Claude request.
+- `budgetApiBaseUrl` tells the APIM policy where to call the combined
+   `GET /v2/budget/<team-id>/<user-object-id>` verdict before forwarding a governed request.
 - `budgetApiAudience` is the Application (client) ID of the Budget API's Entra app
    registration. APIM requests a managed-identity token for this audience, and the
    Budget API validates that the token was intended for it. Use the bare application
@@ -246,6 +260,70 @@ az deployment group create -g <rg> -f infra/11-grafana.bicep \
 
 The dashboard is a separate import because Azure Managed Grafana exposes no ARM path
 for dashboards.
+
+#### Standalone reporting refresh
+
+Run this from the repository root after `14-claude-tiers`, `10-claude-usage-summary-rule`,
+and `11-grafana` have been deployed. The scripts use your current `az login` identity.
+That identity needs Monitoring Metrics Publisher on the direct DCR and Monitoring Reader
+on the Foundry account.
+
+```bash
+SUBSCRIPTION=<subscription-id>
+RG=<resource-group>
+WORKSPACE=<log-analytics-workspace>
+FOUNDRY_ACCOUNT=<ai-services-account>
+GRAFANA=<managed-grafana-name>
+
+python3 -m venv .venv
+.venv/bin/python -m pip install azure-identity azure-monitor-ingestion requests
+
+DCR_ENDPOINT=$(az deployment group show -g "$RG" -n 14-claude-tiers \
+   --query properties.outputs.pricingDcrEndpoint.value -o tsv)
+DCR_ID=$(az deployment group show -g "$RG" -n 14-claude-tiers \
+   --query properties.outputs.pricingDcrImmutableId.value -o tsv)
+WORKSPACE_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WORKSPACE" \
+   --query id -o tsv)
+FOUNDRY_ID=$(az resource show -g "$RG" -n "$FOUNDRY_ACCOUNT" \
+   --resource-type Microsoft.CognitiveServices/accounts --query id -o tsv)
+
+# Maintained APIM-visible input/output rates.
+.venv/bin/python snippets/15-load-pricing.py \
+   --dcr-endpoint "$DCR_ENDPOINT" --dcr-immutable-id "$DCR_ID"
+
+# True aggregate model cost, including cache writes. Safe to rerun: readers dedupe bins.
+.venv/bin/python snippets/20-cost-reconciler.py --resource-id "$FOUNDRY_ID" \
+   --hours 72 --dcr-endpoint "$DCR_ENDPOINT" --dcr-immutable-id "$DCR_ID"
+
+# Retained user/team/model usage. Schema changes apply only to newly generated bins.
+az deployment group create --subscription "$SUBSCRIPTION" -g "$RG" \
+   -n 10-claude-usage-summary-rule -f infra/10-claude-usage-summary-rule.bicep \
+   -p workspaceName="$WORKSPACE"
+
+# Keep 30 days interactive and 370 additional days in archive.
+az rest --method patch --headers 'Content-Type=application/json' \
+   --url "https://management.azure.com${WORKSPACE_ID}/tables/ClaudeUsageHourly_CL?api-version=2022-10-01" \
+   --body '{"properties":{"retentionInDays":30,"totalRetentionInDays":400}}'
+
+# Re-import after dashboard JSON changes.
+./infra/13-import-grafana-dashboard.sh "$GRAFANA" "$RG" "$WORKSPACE_ID"
+```
+
+The summary rule cannot reconstruct team attribution for old requests. Its `TeamId`,
+`TeamProfile`, and `TeamState` columns begin filling only after the updated rule is active,
+and APIM must receive a new inference request using a token issued after team role changes.
+Foundry cache metrics have no caller dimension, so `ClaudeCostRollup_CL` remains aggregate;
+developer and team chargeback intentionally shows APIM-visible estimated cost only.
+
+Validate ingestion after Azure's normal propagation delay:
+
+```kusto
+union
+   (PRICING_CL | summarize Rows=count(), Last=max(TimeGenerated) | extend Table="PRICING_CL"),
+   (ClaudeCostRollup_CL | summarize Rows=count(), Last=max(TimeGenerated) | extend Table="ClaudeCostRollup_CL"),
+   (ClaudeUsageHourly_CL | summarize Rows=count(), Last=max(TimeGenerated) | extend Table="ClaudeUsageHourly_CL")
+| project Table, Rows, Last
+```
 
 In plain terms, `11-grafana.bicep` creates the empty Grafana instance and grants it
 permission to read the Log Analytics workspace. `13-import-grafana-dashboard.sh` then
@@ -329,6 +407,12 @@ to paste. It grants Monitoring Reader so
 [`../snippets/20-cost-reconciler.py`](../snippets/20-cost-reconciler.py) can read the
 cache-token metrics — the only place on Azure where cache **writes** are reported at
 all.
+
+The setup wrapper additionally grants the reconciliation principal Cosmos SQL Data Reader
+through `admin/pricing-access.bicep`. `20-cost-reconciler.py` queries current-month immutable
+ledger rows and replaces Redis user/tier/team/profile totals and over-budget flags with
+month-end-plus-one-day TTLs. Unknown teams, changed profiles, inconsistent tiers, or missing
+request-time attribution stop replay; operators must resolve drift rather than reassign history.
 
 ## `tiersConfig` is declared three times
 

@@ -71,11 +71,44 @@ COSMOS_CONTAINER = os.environ.get("COSMOS_CONTAINER", "usage")
 # {"pro": 1000, "basic": 500, "lite": 100}
 TIERS = {t["name"]: t for t in json.loads(os.environ.get("CLAUDE_TIERS", "[]"))}
 
+# CLAUDE_TEAM_GOVERNANCE is the whole {mode, profiles, teams} block from
+# admin/setup.example.json, serialized once by infra/16-budget-platform.bicep. Parsed
+# here at import time, same as CLAUDE_TIERS above — it is pure JSON decoding, no network
+# call, so it does not risk the "host imports this module to discover functions" trap
+# documented for get_container() below. A malformed or absent value degrades to
+# governance-off rather than crashing function discovery: a typo in an app setting
+# should not take every developer's requests down with it.
+try:
+    _team_governance_raw = json.loads(os.environ.get("CLAUDE_TEAM_GOVERNANCE", "") or "{}")
+except (json.JSONDecodeError, TypeError):
+    log.exception("CLAUDE_TEAM_GOVERNANCE is not valid JSON; treating team governance as off")
+    _team_governance_raw = {}
+
+TEAM_GOVERNANCE_MODE = _team_governance_raw.get("mode", "off")
+# {"power": {...tpm/tokenQuota/costQuota}, "regular": {...}}
+TEAM_PROFILES = {p["name"]: p for p in _team_governance_raw.get("profiles", []) if p.get("name")}
+# {"fdpo-team-1": {...id/profile/defaultUserTier}, ...}. Kept for symmetry with TIERS —
+# nothing here currently reads it, since the policy stamps teamId/teamProfile directly
+# and the processor trusts that stamp rather than re-deriving it from Entra role claims
+# it never sees. It exists so a future consumer (e.g. a "does this team still exist"
+# reconciliation check) does not need another round of config plumbing.
+TEAMS_BY_ID = {t["id"]: t for t in _team_governance_raw.get("teams", []) if t.get("id")}
+
 # How long an unmatched half of a request waits for its other half.
 PAIR_TTL = 900
 # How long the replay guard remembers a request. Longer than any plausible Event Hub
 # retention plus redelivery window, so a late replay still cannot double-charge.
 DONE_TTL = 172800
+
+# Utilization percentages that get a structured event, deduplicated per scope/month so a
+# steady stream of requests past a threshold does not repeat the same alert forever.
+UTILIZATION_THRESHOLDS = (70, 85, 95, 100)
+
+# Diagnostic records older than this when the processor sees them are worth flagging —
+# a growing gap means Redis/Cosmos counters (and therefore budget enforcement) are stale
+# by more than a trivial amount. Chosen well above the ~90s steady-state latency observed
+# in production, so ordinary jitter does not page anyone.
+LAG_WARN_SECONDS = 60
 
 _credential = DefaultAzureCredential()
 
@@ -188,6 +221,36 @@ def _header(props: dict, name: str) -> str:
     return ""
 
 
+def _emit_governance_event(event_type: str, **fields) -> None:
+    """One structured line, one JSON object. Read by the alerts and workbook queries in
+    infra/22-team-governance.bicep / 23-team-governance-workbook.json via
+    `AppTraces | where Message startswith "TEAM_GOVERNANCE_EVENT"`. A structured log line
+    is used instead of a custom Azure Monitor metric because metric dimensions are
+    high-cardinality here (one series per user, per team) and Azure Monitor metrics are
+    not built for that; Log Analytics ingestion is."""
+    log.info("TEAM_GOVERNANCE_EVENT %s", json.dumps({"type": event_type, **fields}, default=str))
+
+
+def _check_thresholds(r, scope: str, scope_id: str, month: str, total: float, quota: float, ttl: int, **extra) -> None:
+    """Emit a threshold_crossed event the first time a scope's utilization reaches each of
+    UTILIZATION_THRESHOLDS in a given month. `SET ... NX` is the dedup: only the request
+    that flips the guard from unset to set gets to emit, so a hundred requests in a row
+    past 95% produce exactly one event, not a hundred."""
+    if quota <= 0:
+        return
+    pct = (total / quota) * 100.0
+    for threshold in UTILIZATION_THRESHOLDS:
+        if pct < threshold:
+            continue
+        guard_key = f"thresh:{scope}:{scope_id}:{month}:{threshold}"
+        if r.set(guard_key, 1, nx=True, ex=ttl):
+            _emit_governance_event(
+                "threshold_crossed",
+                scope=scope, id=scope_id, month=month, threshold=threshold,
+                totalUsd=round(total, 4), quotaUsd=quota, **extra,
+            )
+
+
 @app.function_name(name="usage_processor")
 @app.event_hub_message_trigger(
     arg_name="events",
@@ -224,6 +287,22 @@ def _handle(r, record: dict) -> None:
     if not cid:
         return
 
+    # Lag check: Azure Monitor's diagnostic-setting schema stamps every record with a
+    # top-level "time" — when the event was RECORDED, not when Event Hub delivered it —
+    # so the gap to "now" is processor lag end to end, not just queue time. Using this
+    # instead of the Event Hub message's own enqueued-time metadata avoids depending on
+    # exactly which attribute name a given azure-functions Python binding version exposes
+    # for that, which was not something this environment could verify.
+    record_time = record.get("time") or record.get("Time")
+    if record_time:
+        try:
+            recorded_at = datetime.fromisoformat(record_time.replace("Z", "+00:00"))
+            lag = (datetime.now(timezone.utc) - recorded_at).total_seconds()
+            if lag > LAG_WARN_SECONDS:
+                _emit_governance_event("processor_lag", lagSeconds=round(lag, 1), cid=cid)
+        except (ValueError, AttributeError):
+            pass
+
     if category.endswith("GatewayLlmLogs"):
         request_id = props.get("requestId") or props.get("RequestId") or ""
         payload = {
@@ -253,11 +332,26 @@ def _handle(r, record: dict) -> None:
         oid = _header(props, "x-caller-oid")
         if not oid or oid == "unknown":
             return
+        # x-team-governance-state is stamped by 03-apim-claude-policy.xml's team
+        # resolution step: "ok" (both a team role and a matching profile role were
+        # found), "missing" (no team/profile role present — expected for anyone outside
+        # team governance), or "ambiguous" (more than one team or profile role, or a
+        # profile role that does not match the team's configured profile). Only "ok"
+        # is charged against a team counter below; the rest fall back to user-only
+        # accounting, same as before team governance existed.
+        team_state = _header(props, "x-team-governance-state") or "disabled"
+        team_id = _header(props, "x-caller-team-id") or ""
+        team_profile = _header(props, "x-caller-team-profile") or ""
         payload = {
             "oid": oid,
             "tier": _header(props, "x-caller-tier") or "lite",
             "upn": _header(props, "x-caller-upn") or "",
+            "teamId": team_id,
+            "teamProfile": team_profile,
+            "teamState": team_state,
         }
+        if TEAM_GOVERNANCE_MODE != "off" and team_state == "ambiguous":
+            _emit_governance_event("ambiguous_identity", oid=oid, state=team_state)
         r.hset(f"idn:{cid}", mapping=payload)
         r.expire(f"idn:{cid}", PAIR_TTL)
         other = r.hgetall(f"tok:{cid}")
@@ -295,16 +389,53 @@ def _complete(r, cid: str, tokens: dict, identity: dict) -> None:
                 + completion * float(price["output"])) / 1000.0
 
     month = _month_key()
-    total = float(r.incrbyfloat(f"mtd:{month}:{oid}", cost))
-    r.expire(f"mtd:{month}:{oid}", _seconds_to_month_end() + 86400)
-    r.incrbyfloat(f"mtd:{month}:tier:{tier}", cost)
+    ttl = _seconds_to_month_end() + 86400
+
+    team_id = identity.get("teamId") or ""
+    team_profile = identity.get("teamProfile") or ""
+    team_state = identity.get("teamState") or "disabled"
+    # Only an unambiguous, recognized team+profile pair is charged against a team
+    # counter. "missing" (no team role — most users) and "ambiguous" (policy could not
+    # resolve a single team/profile) both fall back to user-only accounting, exactly as
+    # they did before team governance existed. `team_profile in TEAM_PROFILES` is a
+    # second, independent check against this function's own config — even if the policy
+    # said "ok", a profile name this processor was never told about cannot be priced.
+    team_charged = bool(team_id) and team_state == "ok" and team_profile in TEAM_PROFILES
+
+    # One pipeline, sent as a single MULTI/EXEC transaction, so a user's charge and (when
+    # applicable) their team's charge either both land or neither does. Two counters
+    # advancing out of step would let a user's spend and their team's spend drift apart
+    # for the same set of priced requests — exactly the kind of mismatch a reconciliation
+    # pass would otherwise have to explain away as "normal".
+    pipe = r.pipeline(transaction=True)
+    pipe.incrbyfloat(f"mtd:{month}:{oid}", cost)          # index 0
+    pipe.expire(f"mtd:{month}:{oid}", ttl)                # index 1
+    pipe.incrbyfloat(f"mtd:{month}:tier:{tier}", cost)    # index 2
+    if team_charged:
+        pipe.incrbyfloat(f"mtd:{month}:team:{team_id}", cost)         # index 3
+        pipe.expire(f"mtd:{month}:team:{team_id}", ttl)                # index 4
+        pipe.incrbyfloat(f"mtd:{month}:profile:{team_profile}", cost)  # index 5
+    results = pipe.execute()
+
+    user_total = float(results[0])
+    team_total = float(results[3]) if team_charged else None
 
     quota = TIERS.get(tier, {}).get("costQuota")
-    if quota is not None and total > float(quota):
+    if quota is not None and user_total > float(quota):
         # Expires at month end, so the new month starts everyone clean with no reset job
         # and nothing to forget to run on the 1st.
-        r.set(f"over:{oid}", 1, ex=_seconds_to_month_end() + 86400)
-        log.info("over budget: oid=%s tier=%s mtd=%.4f quota=%s", oid, tier, total, quota)
+        r.set(f"over:{oid}", 1, ex=ttl)
+        log.info("over budget: oid=%s tier=%s mtd=%.4f quota=%s", oid, tier, user_total, quota)
+    _check_thresholds(r, "user", oid, month, user_total, float(quota) if quota is not None else 0.0, ttl, tier=tier)
+
+    if team_charged:
+        team_quota = TEAM_PROFILES.get(team_profile, {}).get("costQuota")
+        if team_quota is not None and team_total > float(team_quota):
+            r.set(f"over:team:{team_id}", 1, ex=ttl)
+            log.info("team over budget: team=%s profile=%s mtd=%.4f quota=%s",
+                      team_id, team_profile, team_total, team_quota)
+        _check_thresholds(r, "team", team_id, month, team_total,
+                           float(team_quota) if team_quota is not None else 0.0, ttl, profile=team_profile)
 
     get_container().upsert_item({
         "id": cid,
@@ -324,6 +455,13 @@ def _complete(r, cid: str, tokens: dict, identity: dict) -> None:
         "pricingStatus": ("priced" if price and (not cached or price.get("cache_read") is not None)
                           else "missing_rates"),
         "month": month,
+        # Team fields are None (never omitted — Cosmos is schemaless, but every ledger
+        # row having the same shape is what lets a reconciliation query filter on
+        # `IS_NULL(teamId)` rather than special-casing missing properties) unless this
+        # request was actually charged to a team counter.
+        "teamId": team_id if team_charged else None,
+        "teamProfile": team_profile if team_charged else None,
+        "teamGovernanceState": team_state,
         "ts": datetime.now(timezone.utc).isoformat(),
     })
 

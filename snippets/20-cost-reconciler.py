@@ -49,6 +49,7 @@ query that reads this table must do that, or a re-run inflates cost silently.
 """
 
 import argparse
+import base64
 import importlib.util
 import json
 import sys
@@ -73,6 +74,127 @@ METRIC_MAP = {
 # pipeline's billed cost to VisibleCostUsd is a different diagnostic — it surfaces
 # traffic that reached Foundry without traversing the gateway.
 VISIBLE_COMPONENTS = ("InputCost", "OutputCost", "CacheReadCost")
+
+
+def build_ledger_totals(rows, month: str, configured_teams: dict | None = None) -> dict:
+    """Aggregate immutable request ledger rows without re-attributing history."""
+    totals = {
+        "users": {}, "tiers": {}, "teams": {}, "profiles": {},
+        "userTiers": {}, "teamProfiles": {},
+    }
+    def add(scope: str, key: str, cost: float) -> None:
+        totals[scope][key] = totals[scope].get(key, 0.0) + cost
+
+    for row in rows:
+        if str(row.get("month", "")) != month:
+            continue
+        oid = row.get("oid")
+        tier = row.get("tier")
+        if not oid or not tier:
+            raise ValueError(f"ledger row {row.get('id', '<unknown>')} lacks oid or tier")
+        cost = float(row.get("costUsd") or 0)
+        previous_tier = totals["userTiers"].setdefault(oid, tier)
+        if previous_tier != tier:
+            raise ValueError(f"tier mismatch for user {oid}: {previous_tier} != {tier}")
+        add("users", oid, cost)
+        add("tiers", tier, cost)
+
+        team_id = row.get("teamId")
+        profile = row.get("teamProfile")
+        if not team_id and not profile:
+            continue
+        if not team_id or not profile:
+            raise ValueError(f"ledger row {row.get('id', '<unknown>')} has incomplete team attribution")
+        previous_profile = totals["teamProfiles"].setdefault(team_id, profile)
+        if previous_profile != profile:
+            raise ValueError(f"profile mismatch for team {team_id}: {previous_profile} != {profile}")
+        if configured_teams is not None:
+            if team_id not in configured_teams:
+                raise ValueError(f"unknown team in ledger: {team_id}")
+            if configured_teams[team_id] != profile:
+                raise ValueError(
+                    f"profile mismatch for team {team_id}: ledger={profile}, configured={configured_teams[team_id]}"
+                )
+        add("teams", team_id, cost)
+        add("profiles", profile, cost)
+
+    return totals
+
+
+def apply_ledger_totals(redis, totals: dict, month: str, ttl: int,
+                        tiers: dict, profiles: dict) -> None:
+    """Replace current-month Redis counters and over-budget flags in one transaction."""
+    pipe = redis.pipeline(transaction=True)
+    stale_keys = list(redis.scan_iter(match=f"mtd:{month}:*")) + list(redis.scan_iter(match="over:*"))
+    if stale_keys:
+        pipe.delete(*stale_keys)
+    for oid, cost in totals["users"].items():
+        pipe.set(f"mtd:{month}:{oid}", cost, ex=ttl)
+        tier = totals["userTiers"][oid]
+        quota = float(tiers.get(tier, {}).get("costQuota", 0) or 0)
+        if quota and cost > quota:
+            pipe.set(f"over:{oid}", 1, ex=ttl)
+        else:
+            pipe.delete(f"over:{oid}")
+    for tier, cost in totals["tiers"].items():
+        pipe.set(f"mtd:{month}:tier:{tier}", cost, ex=ttl)
+    for team_id, cost in totals["teams"].items():
+        pipe.set(f"mtd:{month}:team:{team_id}", cost, ex=ttl)
+        profile = totals["teamProfiles"][team_id]
+        quota = float(profiles.get(profile, {}).get("costQuota", 0) or 0)
+        if quota and cost > quota:
+            pipe.set(f"over:team:{team_id}", 1, ex=ttl)
+        else:
+            pipe.delete(f"over:team:{team_id}")
+    for profile, cost in totals["profiles"].items():
+        pipe.set(f"mtd:{month}:profile:{profile}", cost, ex=ttl)
+    pipe.execute()
+
+
+def fetch_ledger_rows(endpoint: str, database: str, container: str, month: str) -> list[dict]:
+    """Read one UTC billing month from Cosmos using the caller's Entra identity."""
+    from azure.cosmos import CosmosClient
+    from azure.identity import DefaultAzureCredential
+
+    client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+    ledger = client.get_database_client(database).get_container_client(container)
+    return list(ledger.query_items(
+        query="SELECT c.id, c.month, c.oid, c.tier, c.costUsd, c.teamId, c.teamProfile FROM c WHERE c.month = @month",
+        parameters=[{"name": "@month", "value": month}],
+        enable_cross_partition_query=True,
+    ))
+
+
+def get_redis_client(host: str, port: int = 6380):
+    """Create an SSL Redis client using an Entra access token, never an access key."""
+    import redis
+    from azure.identity import DefaultAzureCredential
+
+    token = DefaultAzureCredential().get_token("https://redis.azure.com/.default")
+    payload = token.token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    username = json.loads(base64.urlsafe_b64decode(payload))["oid"]
+    return redis.Redis(
+        host=host, port=port, ssl=True, username=username, password=token.token,
+        decode_responses=True, socket_timeout=10,
+    )
+
+
+def replay_ledger(endpoint: str, database: str, container: str, redis_host: str,
+                  tiers_config: list, governance_config: dict,
+                  now: datetime | None = None, dry_run: bool = False) -> dict:
+    """Rebuild the authoritative current-month budget state from Cosmos."""
+    now = now or datetime.now(timezone.utc)
+    month = now.strftime("%Y%m")
+    next_month = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+    ttl = int((next_month + timedelta(days=1) - now).total_seconds())
+    teams = {team["id"]: team["profile"] for team in governance_config.get("teams", [])}
+    tiers = {tier["name"]: tier for tier in tiers_config}
+    profiles = {profile["name"]: profile for profile in governance_config.get("profiles", [])}
+    totals = build_ledger_totals(fetch_ledger_rows(endpoint, database, container, month), month, teams)
+    if not dry_run:
+        apply_ledger_totals(get_redis_client(redis_host), totals, month, ttl, tiers, profiles)
+    return totals
 
 
 def load_prices() -> dict:
@@ -225,8 +347,30 @@ def main() -> None:
     p.add_argument("--dcr-endpoint", help="logsIngestion endpoint from infra/14-claude-tiers.bicep")
     p.add_argument("--dcr-immutable-id")
     p.add_argument("--dcr-stream", default="Custom-Json-CLAUDECOSTROLLUP_CL")
+    p.add_argument("--cosmos-endpoint", help="Cosmos endpoint containing the immutable usage ledger")
+    p.add_argument("--cosmos-database", default="claude")
+    p.add_argument("--cosmos-container", default="usage")
+    p.add_argument("--redis-host", help="Redis host whose current-month counters are rebuilt")
+    p.add_argument("--tiers-json", help="JSON array matching CLAUDE_TIERS")
+    p.add_argument("--team-governance-json", default='{"mode":"off","profiles":[],"teams":[]}',
+                   help="JSON object matching CLAUDE_TEAM_GOVERNANCE")
     p.add_argument("--dry-run", action="store_true", help="print the rows instead of uploading")
     args = p.parse_args()
+
+    if not args.resource_id.startswith("/subscriptions/") or "/providers/Microsoft.CognitiveServices/accounts/" not in args.resource_id:
+        p.error("--resource-id must be the full ARM ID of a Microsoft.CognitiveServices/accounts resource")
+
+    replay_values = (args.cosmos_endpoint, args.redis_host, args.tiers_json)
+    if any(replay_values) and not all(replay_values):
+        p.error("ledger replay requires --cosmos-endpoint, --redis-host and --tiers-json together")
+    if all(replay_values):
+        totals = replay_ledger(
+            args.cosmos_endpoint, args.cosmos_database, args.cosmos_container,
+            args.redis_host, json.loads(args.tiers_json), json.loads(args.team_governance_json),
+            dry_run=args.dry_run,
+        )
+        print(f"Ledger replay: {len(totals['users'])} users, {len(totals['teams'])} teams",
+              file=sys.stderr)
 
     prices = load_prices()
     resource_name = args.resource_id.rstrip("/").split("/")[-1]

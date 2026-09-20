@@ -1,0 +1,86 @@
+[2026-09-19T14:07:15Z] Streaming setup output to logs/claude-gateway-setup.logclear
+[2026-09-19T14:07:15Z] DEBUG: Debug logging enabled (Azure CLI verbose mode; raw shell tracing is disabled).
+Stage=all; subscription=1c8300c9-08b4-4d88-b426-3868f3b963a1; resource group=rg-test-claude-setup; APIM=sombaner-test-final-apim (centralus); budget=centralus; Cosmos=centralus
+Order: preflight -> bootstrap APIM only if absent -> tiers/DCR -> authenticated budget platform -> pricing permissions + both price stores -> publish Functions -> final APIM -> onboarding export -> optional smoke/reporting/reconciliation.
+Options: {"registerProviders":false,"checkEp1Quota":true,"pricesReviewed":false,"workbook":true,"summaryRule":false,"grafana":false,"reconcile":false,"smokeTest":false}
+StandardV2 APIM, EP1, Redis, Cosmos, Event Hub and optional Grafana incur charges. Budget accounting is asynchronous, fail-open and excludes cache writes.
+[2026-09-19T14:07:15Z] DEBUG: Azure CLI: az account show --subscription
+INFO: Command ran in 0.565 seconds (init: 0.179, invoke: 0.386)
+[2026-09-19T14:07:16Z] DEBUG: Azure CLI: az account set --subscription
+INFO: Command ran in 0.445 seconds (init: 0.094, invoke: 0.351)
+[2026-09-19T14:07:19Z] DEBUG: Azure CLI: az group show --name
+INFO: Command ran in 1.011 seconds (init: 0.104, invoke: 0.907)
+[2026-09-19T14:07:21Z] DEBUG: Azure CLI: az group show --name
+INFO: Command ran in 0.861 seconds (init: 0.099, invoke: 0.762)
+[2026-09-19T14:07:22Z] DEBUG: Azure CLI: az cognitiveservices account show
+INFO: Command ran in 1.681 seconds (init: 0.088, invoke: 1.593)
+[2026-09-19T14:07:23Z] DEBUG: Azure CLI: az resource show --ids
+INFO: Command ran in 1.376 seconds (init: 0.096, invoke: 1.281)
+[2026-09-19T14:07:25Z] DEBUG: Azure CLI: az cognitiveservices account deployment
+INFO: Command ran in 1.084 seconds (init: 0.096, invoke: 0.988)
+[2026-09-19T14:07:26Z] DEBUG: Azure CLI: az ad app show
+INFO: Request URL: 'https://graph.microsoft.com/v1.0/applications?$filter=appId%20eq%20%27956ec5b2-919d-4254-9bf7-40514e38697b%27'
+INFO: Request method: 'GET'
+INFO: Request headers:
+INFO:     'User-Agent': 'python/3.13.15 (macOS-26.6.2-arm64-arm-64bit-Mach-O) AZURECLI/2.87.0 (HOMEBREW)'
+INFO:     'Accept-Encoding': 'gzip, deflate'
+INFO:     'Accept': '*/*'
+INFO:     'Connection': 'keep-alive'
+INFO:     'x-ms-client-request-id': '2aa0dced-1936-4dcf-929b-ff010480f8b9'
+INFO:     'CommandName': 'ad app show'
+INFO:     'ParameterSetName': '--id -o --verbose'
+INFO:     'Authorization': 'Bearer eyJ0eXAiOiJKV...'
+INFO: Request body:
+INFO: None
+INFO: Response status: 200
+INFO: Response headers:
+INFO:     'Date': 'Sat, 19 Sep 2026 14:07:29 GMT'
+INFO:     'Content-Type': 'application/json;odata.metadata=minimal;odata.streaming=true;IEEE754Compatible=false;charset=utf-8'
+INFO:     'Transfer-Encoding': 'chunked'
+INFO:     'Connection': 'keep-alive'
+INFO:     'Cache-Control': 'no-cache'
+INFO:     'Content-Encoding': 'gzip'
+INFO:     'Vary': 'Accept-Encoding'
+INFO:     'Strict-Transport-Security': 'max-age=31536000'
+INFO:     'request-id': '3457ba63-123c-4269-9cce-f50f605a8f26'
+INFO:     'client-request-id': '3457ba63-123c-4269-9cce-f50f605a8f26'
+INFO:     'x-ms-ags-diagnostic': '{"ServerInfo":{"DataCenter":"South India","Slice":"E","Ring":"2","ScaleUnit":"001","RoleInstance":"MA1PEPF0000ECDE"}}'
+INFO:     'x-ms-resource-unit': '2'
+INFO:     'OData-Version': '4.0'
+INFO:     'X-Cache': 'CONFIG_NOCACHE'
+INFO: Response content:
+INFO: {"@odata.context":"https://graph.microsoft.com/v1.0/$metadata#applications","value":[{"id":"d86c28e1-d335-4ffa-9893-ab25eea2d793","deletedDateTime":null,"appId":"956ec5b2-919d-4254-9bf7-40514e38697b","applicationTemplateId":null,"disabledByMicrosoftStatus":null,"createdByAppId":"04b07795-8ddb-461a-bbee-02f9e1bf7b46","createdDateTime":"2026-09-18T09:15:20Z","displayName":"Claude Gateway Sombaner New","description":null,"groupMembershipClaims":null,"identifierUris":[],"isDeviceOnlyAuthSupported":null,"isDisabled":null,"isFallbackPublicClient":null,"nativeAuthenticationApisEnabled":null,"notes":null,"publisherDomain":"fdpo.onmicrosoft.com","serviceManagementReference":"e4847f9a-c5dc-435d-9d53-9b9c65b154e7","signInAudience":"AzureADMyOrg","tags":[],"tokenEncryptionKeyId":null,"uniqueName":null,"samlMetadataUrl":null,"defaultRedirectUri":null,"certification":null,"optionalClaims":null,"requestSignatureVerification":null,"addIns":[],"api":{"acceptMappedClaims":null,"knownClientApplications":[],"requestedAccessTokenVersion":2,"oauth2PermissionScopes":[],"preAuthorizedApplications":[]},"appRoles":[],"info":{"logoUrl":null,"marketingUrl":null,"privacyStatementUrl":null,"supportUrl":null,"termsOfServiceUrl":null},"keyCredentials":[],"parentalControlSettings":{"countriesBlockedForMinors":[],"legalAgeGroupRule":"Allow"},"passwordCredentials":[],"publicClient":{"redirectUris":[]},"requiredResourceAccess":[],"verifiedPublisher":{"displayName":null,"verifiedPublisherId":null,"addedDateTime":null},"web":{"homePageUrl":null,"logoutUrl":null,"redirectUris":[],"implicitGrantSettings":{"enableAccessTokenIssuance":false,"enableIdTokenIssuance":false},"redirectUriSettings":[]},"servicePrincipalLockConfiguration":{"isEnabled":true,"allProperties":true,"credentialsWithUsageVerify":null,"credentialsWithUsageSign":null,"identifierUris":null,"tokenEncryptionKeyId":null},"spa":{"redirectUris":[]}}]}
+INFO: Request URL: 'https://graph.microsoft.com/v1.0/applications/d86c28e1-d335-4ffa-9893-ab25eea2d793'
+INFO: Request method: 'GET'
+INFO: Request headers:
+INFO:     'User-Agent': 'python/3.13.15 (macOS-26.6.2-arm64-arm-64bit-Mach-O) AZURECLI/2.87.0 (HOMEBREW)'
+INFO:     'Accept-Encoding': 'gzip, deflate'
+INFO:     'Accept': '*/*'
+INFO:     'Connection': 'keep-alive'
+INFO:     'x-ms-client-request-id': 'e6448174-cb03-40cd-ab95-ec4db8e82073'
+INFO:     'CommandName': 'ad app show'
+INFO:     'ParameterSetName': '--id -o --verbose'
+INFO:     'Authorization': 'Bearer eyJ0eXAiOiJKV...'
+INFO: Request body:
+INFO: None
+INFO: Response status: 200
+INFO: Response headers:
+INFO:     'Date': 'Sat, 19 Sep 2026 14:07:29 GMT'
+INFO:     'Content-Type': 'application/json;odata.metadata=minimal;odata.streaming=true;IEEE754Compatible=false;charset=utf-8'
+INFO:     'Transfer-Encoding': 'chunked'
+INFO:     'Connection': 'keep-alive'
+INFO:     'Cache-Control': 'no-cache'
+INFO:     'Content-Encoding': 'gzip'
+INFO:     'Vary': 'Accept-Encoding'
+INFO:     'Strict-Transport-Security': 'max-age=31536000'
+INFO:     'request-id': '99b4995b-9903-41af-857f-f3dbd7b65693'
+INFO:     'client-request-id': '99b4995b-9903-41af-857f-f3dbd7b65693'
+INFO:     'x-ms-ags-diagnostic': '{"ServerInfo":{"DataCenter":"South India","Slice":"E","Ring":"2","ScaleUnit":"001","RoleInstance":"MA1PEPF0000ECDE"}}'
+INFO:     'x-ms-resource-unit': '1'
+INFO:     'OData-Version': '4.0'
+INFO:     'X-Cache': 'CONFIG_NOCACHE'
+INFO: Response content:
+INFO: {"@odata.context":"https://graph.microsoft.com/v1.0/$metadata#applications/$entity","id":"d86c28e1-d335-4ffa-9893-ab25eea2d793","deletedDateTime":null,"appId":"956ec5b2-919d-4254-9bf7-40514e38697b","applicationTemplateId":null,"disabledByMicrosoftStatus":null,"createdByAppId":"04b07795-8ddb-461a-bbee-02f9e1bf7b46","createdDateTime":"2026-09-18T09:15:20Z","displayName":"Claude Gateway Sombaner New","description":null,"groupMembershipClaims":null,"identifierUris":[],"isDeviceOnlyAuthSupported":null,"isDisabled":null,"isFallbackPublicClient":null,"nativeAuthenticationApisEnabled":null,"notes":null,"publisherDomain":"fdpo.onmicrosoft.com","serviceManagementReference":"e4847f9a-c5dc-435d-9d53-9b9c65b154e7","signInAudience":"AzureADMyOrg","tags":[],"tokenEncryptionKeyId":null,"uniqueName":null,"samlMetadataUrl":null,"defaultRedirectUri":null,"certification":null,"optionalClaims":null,"requestSignatureVerification":null,"addIns":[],"api":{"acceptMappedClaims":null,"knownClientApplications":[],"requestedAccessTokenVersion":2,"oauth2PermissionScopes":[],"preAuthorizedApplications":[]},"appRoles":[],"info":{"logoUrl":null,"marketingUrl":null,"privacyStatementUrl":null,"supportUrl":null,"termsOfServiceUrl":null},"keyCredentials":[],"parentalControlSettings":{"countriesBlockedForMinors":[],"legalAgeGroupRule":"Allow"},"passwordCredentials":[],"publicClient":{"redirectUris":[]},"requiredResourceAccess":[],"verifiedPublisher":{"displayName":null,"verifiedPublisherId":null,"addedDateTime":null},"web":{"homePageUrl":null,"logoutUrl":null,"redirectUris":[],"implicitGrantSettings":{"enableAccessTokenIssuance":false,"enableIdTokenIssuance":false},"redirectUriSettings":[]},"servicePrincipalLockConfiguration":{"isEnabled":true,"allProperties":true,"credentialsWithUsageVerify":null,"credentialsWithUsageSign":null,"identifierUris":null,"tokenEncryptionKeyId":null},"spa":{"redirectUris":[]}}
+INFO: Command ran in 2.670 seconds (init: 0.145, invoke: 2.525)
+Gateway app identifierUris must include api://956ec5b2-919d-4254-9bf7-40514e38697b.
+Gateway app must define an enabled Claude.User app role.

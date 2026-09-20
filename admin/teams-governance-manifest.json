@@ -1,0 +1,121 @@
+{
+  "mode": "observe",
+  "checkMode": false,
+  "gatewayApplicationObjectId": "5736d91a-58d4-493e-9ffa-4f285cc90f67",
+  "gatewayServicePrincipalId": "8c4b7c84-6066-4306-854b-a8ac69ae980d",
+  "missingOrDisabledAppRoles": [
+    "Claude.Team.FDPO1",
+    "Claude.Team.FDPO2",
+    "Claude.TeamProfile.Power",
+    "Claude.TeamProfile.Regular",
+    "Claude.Tier.Basic",
+    "Claude.Tier.Pro"
+  ],
+  "teams": [
+    {
+      "id": "fdpo-team-1",
+      "displayName": "FDPO Team 1",
+      "groupDisplayName": "Claude Team - FDPO Team 1",
+      "groupStatus": "created",
+      "groupObjectId": "b599531d-8170-4bef-a1d1-3bf36edff220",
+      "missingUsers": [],
+      "members": [
+        {
+          "upn": "nvelayudhan_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "9ea60f9a-6772-455d-94e5-ffa6f8f71f3a"
+        },
+        {
+          "upn": "navg_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "43cc5304-b62c-48c4-a49e-427d621c19a9"
+        },
+        {
+          "upn": "sombanerjee_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "5a134330-8eae-4e61-8acc-6f1f7c543fec"
+        }
+      ],
+      "addedMembers": [
+        {
+          "upn": "nvelayudhan_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "9ea60f9a-6772-455d-94e5-ffa6f8f71f3a"
+        },
+        {
+          "upn": "navg_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "43cc5304-b62c-48c4-a49e-427d621c19a9"
+        },
+        {
+          "upn": "sombanerjee_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "5a134330-8eae-4e61-8acc-6f1f7c543fec"
+        }
+      ],
+      "currentMembers": [],
+      "extraMembers": [],
+      "roleAssignments": [
+        {
+          "role": "Claude.User",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.Team.FDPO1",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.TeamProfile.Power",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.Tier.Pro",
+          "status": "assigned"
+        }
+      ]
+    },
+    {
+      "id": "fdpo-team-2",
+      "displayName": "FDPO Team 2",
+      "groupDisplayName": "Claude Team - FDPO Team 2",
+      "groupStatus": "created",
+      "groupObjectId": "4d98cf5b-e9c1-4410-b91b-1b4ef0b2f119",
+      "missingUsers": [],
+      "members": [
+        {
+          "upn": "vrm_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "0eb6ba23-0afc-4640-8745-85e940a07531"
+        },
+        {
+          "upn": "mrajguru_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "49072098-88f6-4dfe-9f66-b99cf7e0ce08"
+        }
+      ],
+      "addedMembers": [
+        {
+          "upn": "vrm_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "0eb6ba23-0afc-4640-8745-85e940a07531"
+        },
+        {
+          "upn": "mrajguru_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "objectId": "49072098-88f6-4dfe-9f66-b99cf7e0ce08"
+        }
+      ],
+      "currentMembers": [],
+      "extraMembers": [],
+      "roleAssignments": [
+        {
+          "role": "Claude.User",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.Team.FDPO2",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.TeamProfile.Regular",
+          "status": "assigned"
+        },
+        {
+          "role": "Claude.Tier.Basic",
+          "status": "assigned"
+        }
+      ]
+    }
+  ],
+  "ambiguousMembers": []
+}

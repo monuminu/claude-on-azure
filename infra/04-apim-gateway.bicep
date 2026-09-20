@@ -18,6 +18,7 @@
 param apimLocation string = resourceGroup().location
 param apimName string
 param foundryAccountName string
+param foundryResourceGroup string = resourceGroup().name
 param publisherEmail string
 param publisherName string = 'Platform Engineering'
 param entraTenantId string = subscription().tenantId
@@ -47,9 +48,8 @@ param eventHubAuthorizationRuleId string = ''
 @description('Event Hub name within that namespace.')
 param eventHubName string = 'claude-gateway-logs'
 
-resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
-  name: foundryAccountName
-}
+@description('Deploy the API policy. Set false only for the first APIM bootstrap, before 22-team-governance.bicep has created the team named values referenced by the policy.')
+param deployPolicy bool = true
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
   name: apimName
@@ -192,7 +192,7 @@ resource modelsOp 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' =
 }
 
 // Child name must be literally 'policy'.
-resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
+resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = if (deployPolicy) {
   parent: claudeApi
   name: 'policy'
   properties: {
@@ -263,12 +263,17 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
         headers: [ 'User-Agent' ]
       }
       response: {
-        headers: [ 'x-caller-oid', 'x-caller-tier', 'x-claude-denied-by' ]
+        // x-caller-team-id / x-caller-team-profile / x-team-governance-state are set by
+        // 03-apim-claude-policy.xml's team governance section (Phase 5). Present on the
+        // frontend response so a request denied before reaching the backend — e.g. an
+        // enforce-mode identity 403 — still has team attribution. See the ambiguous /
+        // missing identity query in 23-team-governance-workbook.json.
+        headers: [ 'x-caller-oid', 'x-caller-tier', 'x-claude-denied-by', 'x-caller-team-id', 'x-caller-team-profile', 'x-team-governance-state' ]
       }
     }
     backend: {
       request: {
-        headers: [ 'x-caller-oid', 'x-caller-upn', 'x-caller-tier' ]
+        headers: [ 'x-caller-oid', 'x-caller-upn', 'x-caller-tier', 'x-caller-team-id', 'x-caller-team-profile', 'x-team-governance-state' ]
       }
     }
     // Bicep's type definition for DiagnosticContractProperties does not yet know
@@ -326,19 +331,12 @@ resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-0
   }
 }
 
-// Cognitive Services User — the role that grants inference on the /anthropic surface.
-// NOT Cognitive Services OpenAI User (5e0bd9bd-...), which the generic APIM AI docs
-// recommend; that one is OpenAI-only. Owner and Contributor do not grant inference.
-// Foundry User (53ca6127-db72-4b80-b1b0-d745d6d5456d) is the Foundry-native equivalent.
-var cognitiveServicesUser = 'a97b65f3-24c7-4388-baec-2e87135dc908'
-
-resource inferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: foundry
-  name: guid(foundry.id, apim.id, cognitiveServicesUser)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUser)
-    principalId: apim.identity.principalId
-    principalType: 'ServicePrincipal'
+module inferenceRole './04a-apim-foundry-rbac.bicep' = {
+  name: 'apim-foundry-inference-rbac'
+  scope: resourceGroup(foundryResourceGroup)
+  params: {
+    foundryAccountName: foundryAccountName
+    apimPrincipalId: apim.identity.principalId
   }
 }
 

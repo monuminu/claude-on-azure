@@ -1,7 +1,8 @@
 {
   "subscriptionId": "<subscription-id>",
   "tenantId": "<tenant-id>",
-  "resourceGroup": "<existing-resource-group-containing-foundry>",
+  "resourceGroup": "<gateway-resource-group>",
+  "foundryResourceGroup": "<existing-resource-group-containing-foundry>",
   "apimName": "<apim-name>",
   "foundryAccountName": "<existing-foundry-account>",
   "publisherEmail": "<publisher-email>",
@@ -16,8 +17,6 @@
   "gatewayAudience": "<gateway-app-client-id-v2-audience>",
   "budgetApiAudience": "<budget-api-app-client-id>",
   "tokenResource": "api://<gateway-app-client-id>",
-  "pricingPublisherPrincipalId": "<object-id-of-identity-running-python-loaders>",
-  "pricingPublisherPrincipalType": "User",
   "redisSku": "Standard",
   "redisCapacity": 1,
   "storageGovernanceTags": {},
@@ -26,6 +25,50 @@
     { "name": "basic", "tpm": 20000, "tokenQuota": 175000000, "costQuota": 500 },
     { "name": "lite", "tpm": 4000, "tokenQuota": 35000000, "costQuota": 100 }
   ],
+  "teamGovernance": {
+    "mode": "off",
+    "actionGroupIds": [],
+    "profiles": [
+      { "name": "power", "roleValue": "Claude.TeamProfile.Power", "tpm": 500000, "tokenQuota": 700000000, "costQuota": 2500 },
+      { "name": "regular", "roleValue": "Claude.TeamProfile.Regular", "tpm": 100000, "tokenQuota": 175000000, "costQuota": 1000 }
+    ],
+    "teams": [
+      {
+        "id": "fdpo-team-1",
+        "displayName": "FDPO Team 1",
+        "groupDisplayName": "Claude Team - FDPO Team 1",
+        "teamRoleValue": "Claude.Team.FDPO1",
+        "profile": "power",
+        "defaultUserTier": "pro",
+        "allowedModels": [
+          "claude-sonnet-5",
+          "claude-haiku-4-5",
+          "claude-opus-5"
+        ],
+        "members": [
+          "nvelayudhan_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "navg_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "sombanerjee_microsoft.com#EXT#@fdpo.onmicrosoft.com"
+        ]
+      },
+      {
+        "id": "fdpo-team-2",
+        "displayName": "FDPO Team 2",
+        "groupDisplayName": "Claude Team - FDPO Team 2",
+        "teamRoleValue": "Claude.Team.FDPO2",
+        "profile": "regular",
+        "defaultUserTier": "basic",
+        "allowedModels": [
+          "claude-sonnet-5",
+          "claude-haiku-4-5"
+        ],
+        "members": [
+          "vrm_microsoft.com#EXT#@fdpo.onmicrosoft.com",
+          "mrajguru_microsoft.com#EXT#@fdpo.onmicrosoft.com"
+        ]
+      }
+    ]
+  },
   "models": { "opus": "", "sonnet": "", "haiku": "" },
   "clientConfiguration": { "clientId": "", "scopes": "", "settingsFile": "" },
   "pythonExecutable": "python3",

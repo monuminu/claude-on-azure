@@ -89,11 +89,20 @@ let gwBase = ApiManagementGatewayLogs
              OidResp = tostring(ResponseHeaders["x-caller-oid"]),
              TierReq = tostring(BackendRequestHeaders["x-caller-tier"]),
              TierResp= tostring(ResponseHeaders["x-caller-tier"]),
+             TeamReq = tostring(BackendRequestHeaders["x-caller-team-id"]),
+             TeamResp= tostring(ResponseHeaders["x-caller-team-id"]),
+             ProfileReq = tostring(BackendRequestHeaders["x-caller-team-profile"]),
+             ProfileResp= tostring(ResponseHeaders["x-caller-team-profile"]),
+             TeamStateReq = tostring(BackendRequestHeaders["x-team-governance-state"]),
+             TeamStateResp= tostring(ResponseHeaders["x-team-governance-state"]),
              DeniedBy= tostring(ResponseHeaders["x-claude-denied-by"]),
              RawUpn  = tostring(BackendRequestHeaders["x-caller-upn"]),
              UA      = tostring(RequestHeaders["User-Agent"])
     | extend Oid = iff(isempty(OidReq), OidResp, OidReq)
     | extend Tier = coalesce(iff(isempty(TierReq), TierResp, TierReq), "unknown")
+    | extend TeamId = iff(isempty(TeamReq), TeamResp, TeamReq),
+         TeamProfile = iff(isempty(ProfileReq), ProfileResp, ProfileReq),
+         TeamState = iff(isempty(TeamStateReq), TeamStateResp, TeamStateReq)
     | extend Client = case(UA has "claude-cli", "Claude Code",
                            UA has "Electron" and UA has "Claude/", "Claude Desktop",
                            UA startswith "Bun/", "Claude Desktop",
@@ -103,7 +112,7 @@ let ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, R
 let gw = gwBase
     | join kind=leftouter ids on Oid
     | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, "anonymous")
-    | project CorrelationId, ResponseCode, BackendTime, User, Oid, Tier, Client, DeniedBy;
+    | project CorrelationId, ResponseCode, BackendTime, User, Oid, Tier, TeamId, TeamProfile, TeamState, Client, DeniedBy;
 let llm = ApiManagementGatewayLlmLog
     | where isnotempty(RequestId);
 gw
@@ -116,12 +125,12 @@ gw
             Completion       = sum(CompletionTokens),
             Tokens           = sum(TotalTokens),
             Throttled        = countif(ResponseCode in (429, 403)),
-            DeniedBudget     = countif(DeniedBy == "budget"),
+            DeniedBudget     = countif(DeniedBy in ("budget", "user-budget", "team-budget")),
             DeniedAdmin      = countif(DeniedBy == "admin"),
             Errors           = countif(ResponseCode >= 400 and ResponseCode !in (429, 403)),
             LlmStreamFlagTrueRequests = countif(IsStreamCompletion == 1),
             BackendMsP95Raw  = percentile(BackendTime, 95)
-  by Oid, User, Client, Model, Tier
+  by Oid, User, Client, Model, Tier, TeamId, TeamProfile, TeamState
 | extend BackendMsP95 = toint(coalesce(todouble(BackendMsP95Raw), 0.0))
 | project-away BackendMsP95Raw
 '''

@@ -26,6 +26,16 @@
   and the budget 403 - there is no budget API deployed yet, so step 5 has only ever
   taken its fail-open branch. See TIERED-QUOTAS.md.
 
+  TEAM GOVERNANCE (added on top of the verified individual controls above, see
+  .github/plan/plan-teamGovernanceAndBudgetEnforcement.prompt.md): resolves an
+  optional team/profile identity from the same roles claim, in three modes controlled
+  by the `team-governance-mode` named value (infra/22-team-governance.bicep) —
+  "off" (skip entirely, behavior identical to before this was added), "observe"
+  (resolve and stamp headers, meter the team's aggregate token bucket and dollar
+  budget, but never deny for identity problems), and "enforce" (also deny a caller
+  whose team/profile identity does not resolve cleanly). STILL UNVERIFIED end to end
+  on a live gateway pending the promotion rehearsal in Phase 7 of that plan.
+
   Scope: attach to an API whose serviceUrl is
   https://<resource>.services.ai.azure.com/anthropic
   Requires an API Management v2 tier (BasicV2 / StandardV2 / PremiumV2) for the
@@ -35,10 +45,18 @@
   Substitution is textual across the whole document, comments included, so an example
   that names a value you have not created will fail the deployment.
 
-  THREE CONTROLS REJECT TRAFFIC HERE, and telling them apart matters operationally:
-    403 x-claude-denied-by: admin   - step 4, Entra Claude.Suspended role
-    403 x-claude-denied-by: budget  - step 5, month-to-date dollars over the tier cap
-    429 / 403 (no denied-by header) - step 8, llm-token-limit rate or token quota
+  CONTROLS THAT REJECT TRAFFIC HERE, and telling them apart matters operationally:
+    403 x-claude-denied-by: admin             - step 4,  Entra Claude.Suspended role
+    403 x-claude-denied-by: identity           - step 4b, enforce-mode team/profile
+                                                 identity gate (zero or multiple roles)
+    403 x-claude-denied-by: user-budget        - step 5,  MTD dollars over the individual
+                                                 tier cap
+    403 x-claude-denied-by: team-budget        - step 5,  MTD dollars over the team's
+                                                 aggregate cap
+    429 / 403 x-claude-denied-by: user-token-limit - step 8,  individual tier
+                                                 llm-token-limit rate or token quota
+    429 / 403 x-claude-denied-by: team-token-limit - step 8b, team profile
+                                                 llm-token-limit rate or token quota
 -->
 <policies>
   <inbound>
@@ -167,6 +185,87 @@
       <value>@((string)context.Variables["callerTier"])</value>
     </set-header>
 
+    <!-- 2d. Team/profile resolution. See infra/22-team-governance.bicep for why this
+         reads two parsed JSON blobs (team-role-value -> team, profile-role-value ->
+         profile) rather than named values per team: only a policy EXPRESSION can be
+         dynamic here, unlike tokens-per-minute below.
+
+         A team role and a profile role are two SEPARATE app-role assignments (see
+         admin/configure-claude-teams.sh) — a caller can hold one without the other
+         mid-onboarding, or hold a team role paired with the WRONG profile role. Every
+         one of those is "ambiguous", not "ok": this policy never guesses which
+         profile to bill.
+
+         Skipped in "off" mode so a caller with no team ever pays for a JObject.Parse.
+         Populates teamId/teamProfile/teamState even in "observe" mode — nothing here
+         enforces yet, that is step 4b below. -->
+    <set-variable name="teamGovernanceMode" value="{{team-governance-mode}}" />
+    <set-variable name="teamIdentity" value="@{
+        var mode = (string)context.Variables[&quot;teamGovernanceMode&quot;];
+        var result = new JObject();
+        result[&quot;state&quot;] = &quot;disabled&quot;;
+        result[&quot;teamId&quot;] = &quot;&quot;;
+        result[&quot;teamProfile&quot;] = &quot;&quot;;
+        result[&quot;allowedModels&quot;] = new JArray();
+        if (mode == &quot;off&quot;) { return result; }
+
+        var teamsMap = JObject.Parse(System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(&quot;{{team-governance-teams-json}}&quot;)));
+        var profilesMap = JObject.Parse(System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(&quot;{{team-governance-profiles-json}}&quot;)));
+        var roles = (string[])context.Variables[&quot;callerRoles&quot;];
+
+        var matchedTeamCount = 0;
+        var matchedTeam = new JObject();
+        foreach (var prop in teamsMap.Properties()) {
+          if (System.Array.IndexOf(roles, prop.Name) >= 0) {
+            matchedTeamCount++;
+            matchedTeam = (JObject)prop.Value;
+          }
+        }
+        var matchedProfileCount = 0;
+        var matchedProfileRoleValue = &quot;&quot;;
+        var matchedProfile = new JObject();
+        foreach (var prop in profilesMap.Properties()) {
+          if (System.Array.IndexOf(roles, prop.Name) >= 0) {
+            matchedProfileCount++;
+            matchedProfileRoleValue = prop.Name;
+            matchedProfile = (JObject)prop.Value;
+          }
+        }
+
+        if (matchedTeamCount == 0 &amp;&amp; matchedProfileCount == 0) {
+            result[&quot;state&quot;] = &quot;missing&quot;;
+            return result;
+        }
+        if (matchedTeamCount != 1 || matchedProfileCount != 1) {
+            result[&quot;state&quot;] = &quot;ambiguous&quot;;
+            return result;
+        }
+
+        var expectedProfileRoleValue = (string)matchedTeam[&quot;profileRoleValue&quot;];
+        if (matchedProfileRoleValue != expectedProfileRoleValue) {
+            // Exactly one team role and one profile role present, but they do not name
+            // each other - e.g. a Power team member wearing the Regular profile role.
+            // Never bill against a profile the team's own mapping does not expect.
+            result[&quot;state&quot;] = &quot;ambiguous&quot;;
+            return result;
+        }
+
+        result[&quot;state&quot;] = &quot;ok&quot;;
+        result[&quot;teamId&quot;] = (string)matchedTeam[&quot;id&quot;];
+        result[&quot;teamProfile&quot;] = (string)matchedProfile[&quot;name&quot;];
+        result[&quot;allowedModels&quot;] = (JArray)matchedTeam[&quot;allowedModels&quot;];
+        return result;
+    }" />
+    <set-header name="x-caller-team-id" exists-action="override">
+      <value>@((string)((JObject)context.Variables["teamIdentity"])["teamId"])</value>
+    </set-header>
+    <set-header name="x-caller-team-profile" exists-action="override">
+      <value>@((string)((JObject)context.Variables["teamIdentity"])["teamProfile"])</value>
+    </set-header>
+    <set-header name="x-team-governance-state" exists-action="override">
+      <value>@((string)((JObject)context.Variables["teamIdentity"])["state"])</value>
+    </set-header>
+
     <!-- 3. Serve GET /v1/models from the gateway.
          Claude Desktop probes this at launch to populate its model picker, and
          Foundry does not implement it — it returns 404 api_not_supported.
@@ -185,12 +284,29 @@
           <set-header name="Content-Type" exists-action="override">
             <value>application/json</value>
           </set-header>
-          <set-body>{"data":[
-{"type":"model","id":"claude-opus-5","display_name":"Claude Opus 5","created_at":"2026-01-01T00:00:00Z"},
-{"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5","created_at":"2026-01-01T00:00:00Z"},
-{"type":"model","id":"claude-opus-4-5","display_name":"Claude Opus 4.5","created_at":"2025-11-01T00:00:00Z"},
-{"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","created_at":"2025-10-01T00:00:00Z"}
-],"has_more":false,"first_id":"claude-opus-5","last_id":"claude-haiku-4-5"}</set-body>
+          <set-body>@{
+              var catalog = JArray.Parse(@"[
+                {""type"":""model"",""id"":""claude-sonnet-5"",""display_name"":""Claude Sonnet 5"",""created_at"":""2026-01-01T00:00:00Z""},
+                {""type"":""model"",""id"":""claude-haiku-4-5"",""display_name"":""Claude Haiku 4.5"",""created_at"":""2025-10-01T00:00:00Z""},
+                {""type"":""model"",""id"":""claude-opus-5"",""display_name"":""Claude Opus 5"",""created_at"":""2026-01-01T00:00:00Z""}
+              ]");
+              var mode = (string)context.Variables["teamGovernanceMode"];
+              var identity = (JObject)context.Variables["teamIdentity"];
+              var state = (string)identity["state"];
+              var allowedModels = ((JArray)identity["allowedModels"]).ToObject&lt;string[]&gt;();
+              var data = new JArray();
+              foreach (JObject model in catalog) {
+                if (mode != "enforce" || (state == "ok" &amp;&amp; System.Array.IndexOf(allowedModels, (string)model["id"]) &gt;= 0)) {
+                  data.Add(model);
+                }
+              }
+              var result = new JObject();
+              result["data"] = data;
+              result["has_more"] = false;
+              result["first_id"] = data.Count == 0 ? null : (string)((JObject)data[0])["id"];
+              result["last_id"] = data.Count == 0 ? null : (string)((JObject)data[data.Count - 1])["id"];
+              return result.ToString(Newtonsoft.Json.Formatting.None);
+          }</set-body>
         </return-response>
       </when>
     </choose>
@@ -225,7 +341,95 @@
           <set-header name="x-caller-tier" exists-action="override">
             <value>@((string)context.Variables["callerTier"])</value>
           </set-header>
+          <set-header name="x-caller-team-id" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamId"])</value>
+          </set-header>
+          <set-header name="x-caller-team-profile" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamProfile"])</value>
+          </set-header>
+          <set-header name="x-team-governance-state" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["state"])</value>
+          </set-header>
           <set-body>{"type":"error","error":{"type":"permission_error","message":"Your Claude access has been suspended. Contact the platform team."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 4b. Team identity gate. Only bites in "enforce" mode — "off" never resolves a
+         non-disabled state (step 2d short-circuits), and "observe" is deliberately a
+         no-deny reconciliation window: see infra/22-team-governance.bicep and
+         TIERED-QUOTAS.md for the off -> observe -> enforce promotion path. Once
+         promoted, a caller who is not cleanly "ok" — no team/profile role at all, or
+         more than one, or a team/profile pairing that does not match — is denied
+         attributably rather than silently billed against the wrong bucket or none. -->
+    <choose>
+      <when condition="@((string)context.Variables[&quot;teamGovernanceMode&quot;] == &quot;enforce&quot; &amp;&amp; (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;state&quot;] != &quot;ok&quot;)">
+        <return-response>
+          <set-status code="403" reason="Team identity required" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-claude-denied-by" exists-action="override">
+            <value>identity</value>
+          </set-header>
+          <set-header name="x-caller-oid" exists-action="override">
+            <value>@((string)context.Variables["callerOid"])</value>
+          </set-header>
+          <set-header name="x-caller-tier" exists-action="override">
+            <value>@((string)context.Variables["callerTier"])</value>
+          </set-header>
+          <set-header name="x-caller-team-id" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamId"])</value>
+          </set-header>
+          <set-header name="x-caller-team-profile" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamProfile"])</value>
+          </set-header>
+          <set-header name="x-team-governance-state" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["state"])</value>
+          </set-header>
+          <set-body>{"type":"error","error":{"type":"permission_error","message":"Claude access requires exactly one team role and one matching team profile role. Contact the platform team to complete your team assignment."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 4c. Per-team model authorization. The body is preserved because Foundry still
+         needs the original stream after this policy reads the model. Observe/off modes
+         deliberately do not parse or deny, preserving the staged governance rollout. -->
+    <set-variable name="requestedModel" value="@{
+        if ((string)context.Variables[&quot;teamGovernanceMode&quot;] != &quot;enforce&quot; ||
+            (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;state&quot;] != &quot;ok&quot; ||
+            context.Request.Method != &quot;POST&quot; || !context.Request.Url.Path.Contains(&quot;/messages&quot;)) {
+          return &quot;&quot;;
+        }
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return (string)body[&quot;model&quot;] ?? &quot;&quot;;
+    }" />
+    <choose>
+      <when condition="@((string)context.Variables[&quot;requestedModel&quot;] != &quot;&quot; &amp;&amp; System.Array.IndexOf(((JArray)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;allowedModels&quot;]).ToObject&lt;string[]&gt;(), (string)context.Variables[&quot;requestedModel&quot;]) &lt; 0)">
+        <return-response>
+          <set-status code="403" reason="Model not allowed" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-claude-denied-by" exists-action="override">
+            <value>team-model-policy</value>
+          </set-header>
+          <set-header name="x-caller-oid" exists-action="override">
+            <value>@((string)context.Variables["callerOid"])</value>
+          </set-header>
+          <set-header name="x-caller-tier" exists-action="override">
+            <value>@((string)context.Variables["callerTier"])</value>
+          </set-header>
+          <set-header name="x-caller-team-id" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamId"])</value>
+          </set-header>
+          <set-header name="x-caller-team-profile" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamProfile"])</value>
+          </set-header>
+          <set-header name="x-team-governance-state" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["state"])</value>
+          </set-header>
+          <set-body>{"type":"error","error":{"type":"permission_error","message":"The requested Claude model is not enabled for your team. Contact the platform team to request access."}}</set-body>
         </return-response>
       </when>
     </choose>
@@ -253,16 +457,33 @@
          so there is no body to parse, no generic type argument to escape into an XML
          attribute, and no ambiguity about what a malformed response means.
 
+         v2, COMBINED: one call now answers for the user's OWN budget and, when the
+         caller resolved to a team at step 2d, that team's budget too — see
+         snippets/18-budget-api/function_app.py "TEAM GOVERNANCE (v2)". This is the
+         one case a response body IS read, and it is a two-word constant ("user" /
+         "team"), only on the 402 path, purely so the denial can be attributed instead
+         of both scopes collapsing into a single "budget" reason.
+
+         teamId is appended EMPTY for a caller with no resolved team ("missing",
+         "ambiguous", or governance "off") — never (string)null, so string
+         concatenation cannot literally send the four characters "null" as a query
+         value. The v2 endpoint treats an empty teamId as "skip the team check",
+         which keeps this one call correct for every caller regardless of team state.
+
          cache-lookup-value can only be used ONCE per policy section and is not
          allowed inside a policy fragment. This is that one use. -->
+    <set-variable name="budgetTeamId" value="@{
+        var identity = (JObject)context.Variables[&quot;teamIdentity&quot;];
+        return (string)identity[&quot;state&quot;] == &quot;ok&quot; ? (string)identity[&quot;teamId&quot;] : &quot;&quot;;
+    }" />
     <cache-lookup-value
-        key="@(&quot;bud:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+        key="@(&quot;bud:v2:&quot; + (string)context.Variables[&quot;budgetTeamId&quot;] + &quot;:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
         variable-name="overBudget"
         caching-type="prefer-external" />
     <choose>
       <when condition="@(!context.Variables.ContainsKey(&quot;overBudget&quot;))">
         <send-request mode="new" response-variable-name="budResp" timeout="2" ignore-error="true">
-          <set-url>@("{{budget-api-base-url}}/v1/budget/" + (string)context.Variables["callerOid"])</set-url>
+          <set-url>@("{{budget-api-base-url}}/v1/budget/v2/" + (string)context.Variables["callerOid"] + "?teamId=" + (string)context.Variables["budgetTeamId"])</set-url>
           <set-method>GET</set-method>
           <!-- ignore-error="true" here as well, and it is NOT redundant. send-request's
                own ignore-error covers the HTTP call; token acquisition happens while
@@ -273,26 +494,30 @@
           <authentication-managed-identity resource="{{budget-api-audience}}" ignore-error="true" />
         </send-request>
         <set-variable name="overBudget" value="@{
-            if (!context.Variables.ContainsKey(&quot;budResp&quot;)) { return &quot;unknown&quot;; }
+            if (!context.Variables.ContainsKey(&quot;budResp&quot;)) { return &quot;ok&quot;; }
             var r = (IResponse)context.Variables[&quot;budResp&quot;];
-            if (r == null) { return &quot;unknown&quot;; }
-            return r.StatusCode == 402 ? &quot;over&quot; : &quot;ok&quot;;
+            if (r == null || r.StatusCode != 402) { return &quot;ok&quot;; }
+            // Read the body ONLY on 402 — every other status, including a malformed or
+            // unreachable response, already resolved to &quot;ok&quot; above and never touches
+            // the body at all.
+            var body = r.Body.As&lt;string&gt;(preserveContent: false);
+            return body == &quot;team&quot; ? &quot;team&quot; : &quot;user&quot;;
         }" />
         <cache-store-value
-            key="@(&quot;bud:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
+            key="@(&quot;bud:v2:&quot; + (string)context.Variables[&quot;budgetTeamId&quot;] + &quot;:&quot; + (string)context.Variables[&quot;callerOid&quot;])"
             value="@((string)context.Variables[&quot;overBudget&quot;])"
             duration="30" />
       </when>
     </choose>
     <choose>
-      <when condition="@((string)context.Variables[&quot;overBudget&quot;] == &quot;over&quot;)">
+      <when condition="@((string)context.Variables[&quot;overBudget&quot;] == &quot;user&quot; || (string)context.Variables[&quot;overBudget&quot;] == &quot;team&quot;)">
         <return-response>
           <set-status code="403" reason="Budget exceeded" />
           <set-header name="Content-Type" exists-action="override">
             <value>application/json</value>
           </set-header>
           <set-header name="x-claude-denied-by" exists-action="override">
-            <value>budget</value>
+            <value>@(((string)context.Variables["overBudget"] == "team") ? "team-budget" : "user-budget")</value>
           </set-header>
           <set-header name="x-caller-oid" exists-action="override">
             <value>@((string)context.Variables["callerOid"])</value>
@@ -300,7 +525,22 @@
           <set-header name="x-caller-tier" exists-action="override">
             <value>@((string)context.Variables["callerTier"])</value>
           </set-header>
-          <set-body>{"type":"error","error":{"type":"permission_error","message":"Monthly Claude budget exhausted for your tier. It resets on the 1st. Contact the platform team if you need a tier change."}}</set-body>
+          <set-header name="x-caller-team-id" exists-action="override">
+            <value>@((string)context.Variables["budgetTeamId"])</value>
+          </set-header>
+          <set-header name="x-caller-team-profile" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["teamProfile"])</value>
+          </set-header>
+          <set-header name="x-team-governance-state" exists-action="override">
+            <value>@((string)((JObject)context.Variables["teamIdentity"])["state"])</value>
+          </set-header>
+          <set-body>@{
+              var overScope = (string)context.Variables["overBudget"];
+              var message = overScope == "team"
+                  ? "Monthly Claude budget exhausted for your team. It resets on the 1st. Contact the platform team if you need a change."
+                  : "Monthly Claude budget exhausted for your tier. It resets on the 1st. Contact the platform team if you need a tier change.";
+              return "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"" + message + "\"}}";
+          }</set-body>
         </return-response>
       </when>
     </choose>
@@ -366,7 +606,15 @@
 
          x-tokens-remaining on a streamed 200 is emitted BEFORE the completion is
          charged, so it under-reports that request's own usage. Use GatewayLlmLogs
-         for accounting, not this header. -->
+         for accounting, not this header.
+
+         enforcementScope is set immediately before EACH llm-token-limit call below,
+         never after. llm-token-limit throws straight to on-error rather than
+         returning, so a variable only reflects which branch was ATTEMPTING to run,
+         not which one is done — which is exactly what on-error needs to attribute a
+         429/403 to "user-token-limit" or "team-token-limit" without a body to read,
+         matching the user-budget/team-budget naming step 5 already uses. -->
+    <set-variable name="enforcementScope" value="user-token-limit" />
     <choose>
       <when condition="@((string)context.Variables[&quot;callerTier&quot;] == &quot;pro&quot;)">
         <llm-token-limit
@@ -401,6 +649,69 @@
             remaining-tokens-header-name="x-tokens-remaining"
             remaining-quota-tokens-header-name="x-quota-remaining" />
       </otherwise>
+    </choose>
+
+    <!-- 8b. Aggregate team token governance. Skipped entirely in "off" mode and for
+         any caller whose team identity did not resolve to "ok" — same reasoning as
+         step 4b: never bucket spend or throttling against a team the caller was not
+         cleanly and unambiguously assigned to. In "observe" mode this DOES run and
+         DOES throttle: unlike the 4b identity gate (which only denies in "enforce"),
+         a resolved team's aggregate ceiling is a real shared resource from the first
+         moment its members start sending traffic, so this is not gated on
+         enforcement mode the way 4b is.
+
+         COUNTER-KEY IS PROFILE-AND-TEAM-PREFIXED, NOT PER-USER: this is the whole
+         point of an aggregate cap — every member of a team shares one bucket. Profile
+         is folded into the key alongside teamId (not just teamId alone) so that if a
+         team's profile is ever changed via the config, the rename mints a fresh
+         counter rather than inheriting a partially-spent bucket sized for the OLD
+         profile's limits — the same reasoning step 8 gives for tier-prefixing above.
+
+         Falls back to team-profile-default-tpm/-token-quota for any profile name
+         that is not "power" or "regular" — see infra/22-team-governance.bicep, which
+         provisions that fallback named value pair alongside the per-profile ones so
+         this branch is never left with an undefined named value if a new profile is
+         ever added to config before the gateway module is redeployed. -->
+    <choose>
+      <when condition="@((string)context.Variables[&quot;teamGovernanceMode&quot;] != &quot;off&quot; &amp;&amp; (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;state&quot;] == &quot;ok&quot;)">
+        <set-variable name="enforcementScope" value="team-token-limit" />
+        <choose>
+          <when condition="@((string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;teamProfile&quot;] == &quot;power&quot;)">
+            <llm-token-limit
+                counter-key="@(&quot;team:power:&quot; + (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;teamId&quot;])"
+                tokens-per-minute="{{team-profile-power-tpm}}"
+                token-quota="{{team-profile-power-token-quota}}"
+                token-quota-period="Monthly"
+                estimate-prompt-tokens="false"
+                tokens-consumed-header-name="x-team-tokens-consumed"
+                remaining-tokens-header-name="x-team-tokens-remaining"
+                remaining-quota-tokens-header-name="x-team-quota-remaining" />
+          </when>
+          <when condition="@((string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;teamProfile&quot;] == &quot;regular&quot;)">
+            <llm-token-limit
+                counter-key="@(&quot;team:regular:&quot; + (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;teamId&quot;])"
+                tokens-per-minute="{{team-profile-regular-tpm}}"
+                token-quota="{{team-profile-regular-token-quota}}"
+                token-quota-period="Monthly"
+                estimate-prompt-tokens="false"
+                tokens-consumed-header-name="x-team-tokens-consumed"
+                remaining-tokens-header-name="x-team-tokens-remaining"
+                remaining-quota-tokens-header-name="x-team-quota-remaining" />
+          </when>
+          <otherwise>
+            <llm-token-limit
+                counter-key="@(&quot;team:default:&quot; + (string)((JObject)context.Variables[&quot;teamIdentity&quot;])[&quot;teamId&quot;])"
+                tokens-per-minute="{{team-profile-default-tpm}}"
+                token-quota="{{team-profile-default-token-quota}}"
+                token-quota-period="Monthly"
+                estimate-prompt-tokens="false"
+                tokens-consumed-header-name="x-team-tokens-consumed"
+                remaining-tokens-header-name="x-team-tokens-remaining"
+                remaining-quota-tokens-header-name="x-team-quota-remaining" />
+          </otherwise>
+        </choose>
+        <set-variable name="enforcementScope" value="user-token-limit" />
+      </when>
     </choose>
 
     <!-- Caps: 5 dimensions, 100 unique values per dimension, 1000 active time
@@ -445,18 +756,48 @@
     <set-header name="x-caller-tier" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("callerTier", "unknown"))</value>
     </set-header>
+    <!-- ContainsKey rather than GetValueOrDefault: teamIdentity is a JObject, set at
+         step 2d before anything that can reach this far, but guarded anyway rather
+         than assumed. -->
+    <set-header name="x-caller-team-id" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["teamId"] : "")</value>
+    </set-header>
+    <set-header name="x-caller-team-profile" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["teamProfile"] : "")</value>
+    </set-header>
+    <set-header name="x-team-governance-state" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["state"] : "disabled")</value>
+    </set-header>
   </outbound>
 
   <on-error>
     <base />
     <!-- on-error is what actually runs when llm-token-limit rejects. Without this
          block, throttle events are anonymous. It does NOT run for the return-response
-         rejections at steps 4 and 5 — those set their own headers inline. -->
+         rejections at steps 4, 4b and 5 — those set their own headers inline.
+
+         x-claude-denied-by here is read from enforcementScope, set immediately before
+         whichever llm-token-limit call was in flight when the throw happened — see
+         the comment at step 8. It is only meaningful for THIS on-error path; the
+         return-response steps set their own denial reason directly and never reach
+         here. -->
     <set-header name="x-caller-oid" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("callerOid", "unknown"))</value>
     </set-header>
     <set-header name="x-caller-tier" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("callerTier", "unknown"))</value>
+    </set-header>
+    <set-header name="x-claude-denied-by" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("enforcementScope", "user-token-limit"))</value>
+    </set-header>
+    <set-header name="x-caller-team-id" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["teamId"] : "")</value>
+    </set-header>
+    <set-header name="x-caller-team-profile" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["teamProfile"] : "")</value>
+    </set-header>
+    <set-header name="x-team-governance-state" exists-action="override">
+      <value>@(context.Variables.ContainsKey("teamIdentity") ? (string)((JObject)context.Variables["teamIdentity"])["state"] : "disabled")</value>
     </set-header>
   </on-error>
 </policies>

@@ -61,6 +61,13 @@ param tiersConfig array = [
   { name: 'lite',  tpm: 4000,  tokenQuota: 35000000,  costQuota: 100 }
 ]
 
+@description('The whole teamGovernance block from admin/setup.example.json ({mode, profiles, teams}), passed through unmodified. Serialized as one JSON app setting (CLAUDE_TEAM_GOVERNANCE) that both functions parse once at startup — no network call, same pattern as CLAUDE_TIERS below. Must describe the SAME profiles/teams as infra/22-team-governance.bicep; that module reads the identical config to build its named values, but the two are deployed independently and neither reads the other\'s output, so keep the parameter files in sync (admin/claude-gateway-setup.sh does this from one JSON source).')
+param teamGovernanceConfig object = {
+  mode: 'off'
+  profiles: []
+  teams: []
+}
+
 @description('Redis SKU. Standard is the minimum with a replica; take Premium for zone redundancy and persistence. A cold Redis means every developer starts the month at zero spend until you replay the Cosmos ledger, so this is not the line to save money on.')
 @allowed([ 'Standard', 'Premium' ])
 param redisSku string = 'Standard'
@@ -305,6 +312,13 @@ resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
 
 var tiersJson = string(tiersConfig)
 
+// Same "parse once, no network call" treatment as CLAUDE_TIERS. Shipping the whole
+// {mode, profiles, teams} block as one setting (rather than three) keeps the two
+// functions' startup parsing symmetrical with how admin/setup.example.json already
+// groups it, and avoids a partial update leaving mode and profiles/teams out of sync
+// across an app restart.
+var teamGovernanceJson = string(teamGovernanceConfig)
+
 var sharedAppSettings = [
   { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
   { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
@@ -319,6 +333,7 @@ var sharedAppSettings = [
   { name: 'COSMOS_DATABASE', value: cosmosDb.name }
   { name: 'COSMOS_CONTAINER', value: usageContainer.name }
   { name: 'CLAUDE_TIERS', value: tiersJson }
+  { name: 'CLAUDE_TEAM_GOVERNANCE', value: teamGovernanceJson }
   { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
 ]
 
@@ -595,3 +610,6 @@ output processorPrincipalId string = processorApp.identity.principalId
 output budgetApiPrincipalId string = budgetApiApp.identity.principalId
 output redisHost string = '${redis.name}.redis.cache.windows.net'
 output cosmosEndpoint string = cosmos.properties.documentEndpoint
+output cosmosAccountName string = cosmos.name
+output cosmosDatabaseName string = cosmosDb.name
+output cosmosContainerName string = usageContainer.name

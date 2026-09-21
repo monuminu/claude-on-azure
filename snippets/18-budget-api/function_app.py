@@ -30,6 +30,31 @@ response cannot accidentally read as "over budget".
 
 WRITES NOTHING. Its Redis grant is Data Reader. Nothing reachable from the request path
 can corrupt the ledger it reads.
+
+TEAM GOVERNANCE (v2)
+
+APIM's llm-token-limit / cache-lookup-value machinery allows exactly one cache-lookup-value
+per policy section, so once a team budget needed checking too, the choice was between two
+sequential HTTP calls per request or one endpoint that answers for both scopes. This is the
+one-call version:
+
+    GET /v1/budget/v2/{oid}?teamId=<teamId>   ->  200  body "ok"   neither scope is over
+                                                   402  body "user" the USER is over budget
+                                                   402  body "team" the TEAM is over budget
+                                                   anything else / no answer: within budget,
+                                                   same fail-open rule as v1
+
+The policy caches this under `bud:v2:<teamId>:<oid>` (empty teamId string when the caller
+has no team) and reads the body only when the status is 402, to set
+`x-claude-denied-by: user-budget` or `team-budget` — the ONE place in this design a
+response body is parsed, and it is a two-word constant, not anything structured.
+
+`teamId` omitted or empty checks the user scope only and never queries a `team:` key —
+there is no team-shaped key to collide with an empty id, but the check is skipped
+explicitly rather than relying on that.
+
+v1 is UNCHANGED and stays reachable. It is smaller, still correct for any caller with no
+concept of team governance, and removing it would be a breaking change for zero benefit.
 """
 
 import json
@@ -97,6 +122,35 @@ def budget(req: func.HttpRequest) -> func.HttpResponse:
 
     if over:
         return func.HttpResponse(status_code=402, body="over")
+    return func.HttpResponse(status_code=200, body="ok")
+
+
+@app.function_name(name="budget_v2")
+@app.route(route="v1/budget/v2/{oid}", methods=["GET"])
+def budget_v2(req: func.HttpRequest) -> func.HttpResponse:
+    oid = req.route_params.get("oid", "")
+    if not oid:
+        return func.HttpResponse(status_code=400)
+    team_id = req.params.get("teamId", "") or ""
+
+    try:
+        r = get_redis()
+        # User checked first: it is the tighter, always-applicable scope, and a caller
+        # denied for being over their OWN budget should never see "team" in the body —
+        # that would send an admin investigating the wrong quota.
+        user_over = bool(r.exists(f"over:{oid}"))
+        team_over = bool(team_id) and bool(r.exists(f"over:team:{team_id}"))
+    except Exception:
+        # Same fail-open contract as v1, for the same reason: this endpoint is in the
+        # request path of every Claude call, and a Redis blip must not become a
+        # site-wide outage.
+        log.exception("redis unavailable, allowing request for %s (team %s)", oid, team_id)
+        return func.HttpResponse(status_code=200, body="ok")
+
+    if user_over:
+        return func.HttpResponse(status_code=402, body="user")
+    if team_over:
+        return func.HttpResponse(status_code=402, body="team")
     return func.HttpResponse(status_code=200, body="ok")
 
 

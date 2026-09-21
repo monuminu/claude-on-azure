@@ -1381,6 +1381,106 @@
         }
       },
       "description": "Per-model breakdown. Models with no rate in 15-load-pricing.py are dropped by the reconciler and named on its stderr \u2014 a Claude model missing here is costing money and reporting zero."
+    },
+    {
+      "id": 29,
+      "type": "row",
+      "title": "Team governance and chargeback",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 70 },
+      "panels": []
+    },
+    {
+      "id": 30,
+      "title": "Estimated cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 71 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), Tokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4) by TeamId | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Team-attributed APIM cost. Requires a fresh caller token with exactly one team and one matching profile role. Excludes cache writes."
+    },
+    {
+      "id": 31,
+      "title": "Estimated developer cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 71 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"])), Oid=tostring(coalesce(BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"])), Developer=tostring(coalesce(BackendRequestHeaders[\"x-caller-upn\"], BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), Tokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4), Models=make_set(Model, 10) by TeamId, Developer, Oid | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Primary developer chargeback view, segregated by resolved team. Excludes aggregate-only cache-write cost."
+    },
+    {
+      "id": 32,
+      "title": "Model usage and cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 80 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), PromptTokens=sum(PromptTokens), CompletionTokens=sum(CompletionTokens), TotalTokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4) by TeamId, Model | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Prompt/completion usage and estimated APIM-visible cost per model and team."
+    },
+    {
+      "id": 33,
+      "title": "Team attribution health",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 80 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"])) | summarize Requests=count() by TeamState=iff(isempty(TeamState), \"legacy/unset\", TeamState), TeamId=iff(isempty(TeamId), \"unattributed\", TeamId) | order by Requests desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Use this before chargeback panels: only governance state ok with a nonempty team ID is billable to a team."
     }
   ],
   "templating": {

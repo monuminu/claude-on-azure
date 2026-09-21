@@ -40,7 +40,7 @@ Dollars need a second mechanism.
 |---|---|
 | Tier source | Entra **app roles** |
 | Budget granularity | **Per developer**, tier sets the size |
-| Model access | All tiers, all models |
+| Model access | Per-team allowlist enforced by APIM in team-governance `enforce` mode; tier does not determine model access |
 | Exhaustion | **Hard 403** until the period resets |
 | Clients | **Claude Desktop must keep working** — no client-side change |
 | Enforcement lag | **Near-real-time is sufficient** (seconds, not zero) |
@@ -455,6 +455,22 @@ developers at roughly a third of their real budget.
 - **Dollar enforcement is delayed and currently partial.** Even complete post-request accounting
   allows concurrent requests and propagation delay to overshoot. A strict cap needs bounded
   admission and atomic reservation/settlement; fail-open behavior cannot guarantee a ceiling.
+
+### Team governance extension
+
+The deployed design can add one team and one team-profile identity per caller from Entra app-role
+claims. In `observe`, missing or ambiguous team identity is logged while individual controls
+continue; in `enforce`, it returns an identity-attributed 403. APIM applies both individual and
+profile-selected team token policies and asks one v2 budget endpoint for user/team cost state.
+Redis holds current enforcement state; expanded Cosmos rows preserve the team/profile/tier seen
+when the request occurred and are the only supported source for rebuilding attributed counters.
+Foundry aggregate metrics cannot supply caller identity and must not reconstruct teams.
+
+Group reconciliation is direct-membership and additive-only. Every governed group receives
+`Claude.User`, one default `Claude.Tier.*`, one `Claude.Team.*`, and one
+`Claude.TeamProfile.*` assignment. Membership transfer and removal require separate approval,
+and role changes require a fresh token. Promotion and rollback evidence is defined in
+[the team governance live checklist](docs/team-governance-live-validation.md).
 
 ---
 
